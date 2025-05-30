@@ -12,7 +12,7 @@ DB_HOST = os.environ.get("DB_HOST")
 DB_NAME = os.environ.get("DB_NAME")
 DB_USER = os.environ.get("DB_USER")
 DB_PASSWORD = os.environ.get("DB_PASSWORD")
-DB_PORT = os.environ.get("DB_PORT", "5432")
+DB_PORT = os.environ.get("DB_PORT", "5432") 
 
 BASE_URL_V2 = "https://api.tiny.com.br/api2"
 
@@ -24,20 +24,15 @@ ENDPOINT_PEDIDOS_PESQUISA = "/pedidos.pesquisa.php"
 ENDPOINT_PEDIDO_OBTER = "/pedido.obter.php" 
 
 # Nome dos processos para controle de última execução
-PROCESSO_CATEGORIAS = "categorias" # Embora categorias sejam sempre recarregadas, podemos adicionar controle se necessário
+PROCESSO_CATEGORIAS = "categorias" 
 PROCESSO_PRODUTOS = "produtos"
 PROCESSO_PEDIDOS = "pedidos"
 
-# Data inicial para a primeira carga, se nenhum timestamp for encontrado (formato dd/mm/yyyy)
-DATA_INICIAL_PRIMEIRA_CARGA_LEGACY = "01/01/2023" # Usado se não houver timestamp
-# Formato esperado pela API para dataAlteracaoInicial (dd/mm/yyyy hh:mm:ss)
-DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL = (datetime.datetime.now() - datetime.timedelta(days=365)).strftime("%d/%m/%Y %H:%M:%S")
-
+DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=365)).strftime("%d/%m/%Y %H:%M:%S")
 
 # --- Funções de Banco de Dados (PostgreSQL) ---
 
 def get_db_connection():
-    """Estabelece conexão com o banco de dados PostgreSQL."""
     conn = None
     try:
         conn = psycopg2.connect(
@@ -53,7 +48,6 @@ def get_db_connection():
     return conn
 
 def criar_tabelas_db(conn):
-    """Cria as tabelas no banco de dados PostgreSQL se não existirem."""
     commands = (
         """
         CREATE TABLE IF NOT EXISTS categorias (
@@ -76,6 +70,7 @@ def criar_tabelas_db(conn):
             preco_promocional_produto REAL,
             preco_custo_produto REAL,
             tipo_variacao_produto TEXT
+            -- NENHUMA COLUNA DE ESTOQUE AQUI
         );
         """,
         """
@@ -154,7 +149,6 @@ def get_ultima_execucao(conn, nome_processo):
             cur.execute("SELECT timestamp_ultima_execucao FROM script_ultima_execucao WHERE nome_processo = %s", (nome_processo,))
             resultado = cur.fetchone()
             if resultado and resultado[0]:
-                # Adiciona 1 segundo para evitar reprocessar o mesmo segundo
                 return (resultado[0] + datetime.timedelta(seconds=1)).strftime("%d/%m/%Y %H:%M:%S") 
     except (Exception, psycopg2.DatabaseError) as error:
         print(f"Erro ao buscar última execução para '{nome_processo}': {error}")
@@ -162,7 +156,7 @@ def get_ultima_execucao(conn, nome_processo):
 
 def set_ultima_execucao(conn, nome_processo, timestamp=None):
     if timestamp is None:
-        timestamp = datetime.datetime.now(datetime.timezone.utc) # Armazena em UTC
+        timestamp = datetime.datetime.now(datetime.timezone.utc) 
     try:
         with conn.cursor() as cur:
             cur.execute("""
@@ -182,7 +176,7 @@ def salvar_categoria_db(conn, categoria_dict, id_pai=None):
     if cat_id_str and cat_descricao: 
         try:
             cat_id = int(cat_id_str) 
-            print(f"Salvando/Atualizando categoria: ID {cat_id}, Descrição: '{cat_descricao}', Pai ID: {id_pai}") 
+            # print(f"Salvando/Atualizando categoria: ID {cat_id}, Descrição: '{cat_descricao}', Pai ID: {id_pai}") 
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO categorias (id_categoria, descricao_categoria, id_categoria_pai)
@@ -204,6 +198,9 @@ def salvar_produto_db(conn, produto_lista_dict):
         id_produto = int(produto_lista_dict.get("id"))
         nome_produto = produto_lista_dict.get("nome")
         # print(f"  Salvando/Atualizando produto (dados básicos): ID {id_produto}, Nome: '{nome_produto[:30]}...'")
+
+        codigo_produto_api = produto_lista_dict.get("codigo")
+        codigo_produto_db = codigo_produto_api if codigo_produto_api and codigo_produto_api.strip() != "" else None
 
         preco = float(produto_lista_dict.get("preco", 0)) if produto_lista_dict.get("preco") not in [None, ''] else 0.0
         preco_promocional = float(produto_lista_dict.get("preco_promocional", 0)) if produto_lista_dict.get("preco_promocional") not in [None, ''] else 0.0
@@ -228,7 +225,7 @@ def salvar_produto_db(conn, produto_lista_dict):
                     preco_custo_produto = EXCLUDED.preco_custo_produto,
                     tipo_variacao_produto = EXCLUDED.tipo_variacao_produto;
             """, (
-                id_produto, nome_produto, produto_lista_dict.get("codigo"),
+                id_produto, nome_produto, codigo_produto_db, 
                 preco, produto_lista_dict.get("unidade"), produto_lista_dict.get("situacao"),
                 produto_lista_dict.get("data_criacao"), produto_lista_dict.get("gtin"),
                 preco_promocional, preco_custo, produto_lista_dict.get("tipoVariacao")
@@ -236,15 +233,16 @@ def salvar_produto_db(conn, produto_lista_dict):
     except ValueError: print(f"Erro de valor ao processar dados do produto ID '{produto_lista_dict.get('id')}'.")
     except (Exception, psycopg2.DatabaseError) as error: 
         print(f"Erro PostgreSQL ao inserir/atualizar produto {produto_lista_dict.get('id')}: {error}")
-        conn.rollback()
+        conn.rollback() 
+        raise 
 
 def salvar_produto_estoque_total_db(conn, id_produto_api, nome_produto_api, saldo_total_api_valor, saldo_reservado_api_valor):
     try:
         id_produto_int = int(id_produto_api)
-        saldo_total = float(saldo_total_api_valor) if saldo_total_api_valor is not None else 0.0
-        saldo_reservado = float(saldo_reservado_api_valor) if saldo_reservado_api_valor is not None else 0.0
+        saldo_total = float(saldo_total_api_valor) if saldo_total_api_valor is not None and saldo_total_api_valor != '' else 0.0
+        saldo_reservado = float(saldo_reservado_api_valor) if saldo_reservado_api_valor is not None and saldo_reservado_api_valor != '' else 0.0
         
-        # print(f"    Salvando/Atualizando estoque total para Produto ID {id_produto_int}: Total={saldo_total}, Reservado={saldo_reservado}")
+        # print(f"    Salvando/Atualizando estoque total para Produto ID {id_produto_int}: Nome '{nome_produto_api}', Total={saldo_total}, Reservado={saldo_reservado}")
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO produto_estoque_total (id_produto, nome_produto_estoque, saldo_total_api, saldo_reservado_api)
@@ -259,6 +257,7 @@ def salvar_produto_estoque_total_db(conn, id_produto_api, nome_produto_api, sald
     except (Exception, psycopg2.DatabaseError) as error:
         print(f"    Erro PostgreSQL ao salvar estoque total para Produto ID {id_produto_api}: {error}")
         conn.rollback()
+        raise
 
 def salvar_estoque_por_deposito_db(conn, id_produto_api, nome_produto_api, lista_depositos_api):
     id_produto_int = int(id_produto_api)
@@ -269,22 +268,24 @@ def salvar_estoque_por_deposito_db(conn, id_produto_api, nome_produto_api, lista
             if not lista_depositos_api or not isinstance(lista_depositos_api, list):
                 return
             
-            # print(f"    Salvando estoque por depósito para Produto ID {id_produto_int}:")
             for dep_wrapper in lista_depositos_api:
                 dep_data = dep_wrapper.get("deposito")
                 if dep_data and isinstance(dep_data, dict):
                     try:
                         nome_dep = dep_data.get("nome")
                         saldo_dep_str = dep_data.get("saldo")
-                        saldo_dep = float(saldo_dep_str) if saldo_dep_str is not None else 0.0
+                        saldo_dep = float(saldo_dep_str) if saldo_dep_str is not None and saldo_dep_str != '' else 0.0
                         desconsiderar = dep_data.get("desconsiderar")
                         empresa = dep_data.get("empresa")
 
-                        # print(f"      - Depósito: '{nome_dep}', Saldo: {saldo_dep}")
                         cur.execute("""
                             INSERT INTO produto_estoque_depositos 
                             (id_produto, nome_produto_estoque, nome_deposito, saldo_deposito, desconsiderar_deposito, empresa_deposito)
                             VALUES (%s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (id_produto, nome_deposito, empresa_deposito) DO UPDATE SET
+                                nome_produto_estoque = EXCLUDED.nome_produto_estoque,
+                                saldo_deposito = EXCLUDED.saldo_deposito,
+                                desconsiderar_deposito = EXCLUDED.desconsiderar_deposito;
                         """, (id_produto_int, nome_produto_api, nome_dep, saldo_dep, desconsiderar, empresa))
                     except ValueError:
                         print(f"        ERRO de valor ao processar dados do depósito '{nome_dep}' para produto ID {id_produto_int}.")
@@ -293,13 +294,11 @@ def salvar_estoque_por_deposito_db(conn, id_produto_api, nome_produto_api, lista
     except (Exception, psycopg2.DatabaseError) as error_main:
         print(f"    Erro PostgreSQL na operação de estoque por depósito para produto ID {id_produto_int}: {error_main}")
         conn.rollback()
+        raise
 
 def salvar_pedido_db(conn, pedido_dict):
     try:
         id_pedido = int(pedido_dict.get("id"))
-        nome_cliente = pedido_dict.get("nome")
-        # print(f"  Salvando/Atualizando cabeçalho do pedido: ID {id_pedido}, Cliente: '{nome_cliente}'") 
-
         valor = float(pedido_dict.get("valor", 0)) if pedido_dict.get("valor") not in [None, ''] else 0.0
         with conn.cursor() as cur:
             cur.execute("""
@@ -321,7 +320,7 @@ def salvar_pedido_db(conn, pedido_dict):
                     codigo_rastreamento = EXCLUDED.codigo_rastreamento;
             """, (
                 id_pedido, pedido_dict.get("numero"), pedido_dict.get("numero_ecommerce"),
-                pedido_dict.get("data_pedido"), pedido_dict.get("data_prevista"), nome_cliente,
+                pedido_dict.get("data_pedido"), pedido_dict.get("data_prevista"), pedido_dict.get("nome"),
                 valor, pedido_dict.get("id_vendedor"), pedido_dict.get("nome_vendedor"),
                 pedido_dict.get("situacao"), pedido_dict.get("codigo_rastreamento")
             ))
@@ -329,19 +328,17 @@ def salvar_pedido_db(conn, pedido_dict):
     except (Exception, psycopg2.DatabaseError) as error: 
         print(f"Erro PostgreSQL ao inserir/atualizar pedido {pedido_dict.get('id')}: {error}")
         conn.rollback()
+        raise
 
 def salvar_pedido_itens_db(conn, id_pedido_api, itens_lista_api):
     id_pedido_int = int(id_pedido_api)
     try:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM pedido_itens WHERE id_pedido = %s", (id_pedido_int,))
-            if not itens_lista_api or not isinstance(itens_lista_api, list):
-                return
+            if not itens_lista_api or not isinstance(itens_lista_api, list): return
             for item_dict_wrapper in itens_lista_api: 
                 item_data = item_dict_wrapper.get("item")
-                if not item_data or not isinstance(item_data, dict):
-                    print(f"      Formato de item inesperado para pedido {id_pedido_int}: {item_dict_wrapper}")
-                    continue
+                if not item_data or not isinstance(item_data, dict): continue
                 try:
                     id_produto_tiny = int(item_data.get("id_produto")) if item_data.get("id_produto") else None 
                     quantidade = float(item_data.get("quantidade", 0)) if item_data.get("quantidade") not in [None, ''] else 0.0
@@ -355,12 +352,13 @@ def salvar_pedido_itens_db(conn, id_pedido_api, itens_lista_api):
                         id_pedido_int, id_produto_tiny, item_data.get("codigo"), item_data.get("descricao"),
                         quantidade, item_data.get("unidade"), valor_unitario, item_data.get("id_grade")
                     ))
-                except ValueError: print(f"      ERRO de valor ao converter dados do item para pedido {id_pedido_int}, produto ID Tiny '{item_data.get('id_produto')}'.")
+                except ValueError: print(f"      ERRO de valor (item pedido) {id_pedido_int}, produto '{item_data.get('id_produto')}'.")
                 except (Exception, psycopg2.DatabaseError) as error_item:
-                    print(f"      Erro PostgreSQL ao inserir item para pedido {id_pedido_int} (Produto Tiny ID: {item_data.get('id_produto')}): {error_item}")
+                    print(f"      Erro PostgreSQL (item pedido) {id_pedido_int}, produto '{item_data.get('id_produto')}': {error_item}")
     except (Exception, psycopg2.DatabaseError) as error_main:
-        print(f"    Erro PostgreSQL na operação de itens do pedido ID {id_pedido_int}: {error_main}")
+        print(f"    Erro PostgreSQL (itens pedido) {id_pedido_int}: {error_main}")
         conn.rollback()
+        raise
 
 # --- Funções da API ---
 def make_api_v2_request(endpoint_path, method="GET", extra_params=None):
@@ -379,33 +377,29 @@ def make_api_v2_request(endpoint_path, method="GET", extra_params=None):
         if method.upper() == "GET": response = requests.get(full_url, params=params, timeout=45)
         else: print(f"Método {method} não suportado."); return None, False
         
-        # Log da resposta apenas para obter detalhes de ESTOQUE ou PEDIDO
-        if endpoint_path == ENDPOINT_PRODUTO_OBTER_ESTOQUE or endpoint_path == ENDPOINT_PEDIDO_OBTER:
-            # print(f"\n--- Resposta Bruta de {endpoint_path} (Status: {response.status_code}) ---") # Comentado para reduzir log
-            try:
-                response_data_preview = response.json()
-                # print(json.dumps(response_data_preview, indent=2, ensure_ascii=False)) # Comentado para reduzir log
-            except json.JSONDecodeError:
-                # print(f"Corpo da resposta (não JSON ou erro ao decodificar): {response.text[:200]}...") # Comentado
-                pass
-            # print(f"--- Fim da Resposta Bruta de {endpoint_path} ---")
+        # if endpoint_path == ENDPOINT_PRODUTO_OBTER_ESTOQUE or endpoint_path == ENDPOINT_PEDIDO_OBTER: # Log detalhado
+        #     print(f"\n--- Resposta Bruta de {endpoint_path} (Status: {response.status_code}) ---")
+        #     try:
+        #         print(json.dumps(response.json(), indent=2, ensure_ascii=False))
+        #     except json.JSONDecodeError:
+        #         print(f"Corpo da resposta (não JSON): {response.text[:200]}...")
+        #     print(f"--- Fim da Resposta Bruta de {endpoint_path} ---")
 
         response.raise_for_status()
         response_data = response.json() 
         retorno_geral = response_data.get("retorno")
         
         if not retorno_geral:
-            print(f"ERRO: Chave 'retorno' ausente ou vazia na resposta JSON de {endpoint_path}.")
+            print(f"ERRO: Chave 'retorno' ausente na resposta JSON de {endpoint_path}.")
             return None, False
 
         if endpoint_path == ENDPOINT_CATEGORIAS:
-            if isinstance(retorno_geral, list):
-                return retorno_geral, True 
+            if isinstance(retorno_geral, list): return retorno_geral, True 
             elif isinstance(retorno_geral, dict) and retorno_geral.get("status") != "OK":
                 print(f"ERRO API Tiny (Categorias): Status '{retorno_geral.get('status')}'")
                 return None, False
             else: 
-                print(f"ERRO: Resposta inesperada para Categorias. 'retorno' é {type(retorno_geral)}.")
+                print(f"ERRO: Resposta inesperada para Categorias: {type(retorno_geral)}.")
                 return None, False
 
         if not isinstance(retorno_geral, dict):
@@ -434,36 +428,37 @@ def get_categorias_v2(conn):
         for categoria_raiz_dict in lista_categorias:
             salvar_categoria_db(conn, categoria_raiz_dict, id_pai=None)
         conn.commit()
-        print("Categorias processadas e salvas.")
-        return lista_categorias
+        print(f"Categorias processadas. {len(lista_categorias)} categorias raiz afetadas/verificadas.")
+        return True
     print("\nNão foi possível buscar ou salvar as categorias.")
-    return None
+    return False
 
 def get_estoque_produto_v2(id_produto_tiny):
     params = {"id": id_produto_tiny}
-    # print(f"  Buscando estoque para produto ID: {id_produto_tiny}") # Log já está em make_api_v2_request
+    # print(f"  Buscando estoque para produto ID: {id_produto_tiny}")
     retorno_obj, sucesso = make_api_v2_request(ENDPOINT_PRODUTO_OBTER_ESTOQUE, extra_params=params)
     if sucesso and retorno_obj:
         produto_estoque_data = retorno_obj.get("produto") 
         if produto_estoque_data:
             return produto_estoque_data 
-    print(f"  Não foi possível buscar dados de estoque para o produto ID: {id_produto_tiny} ou chamada à API falhou.")
+    # print(f"  Não foi possível buscar dados de estoque para o produto ID: {id_produto_tiny}")
     return None 
 
 def search_produtos_v2(conn, data_alteracao_inicial=None, pagina=1):
-    # Removido 'situacao' e 'termo_pesquisa' dos argumentos padrão para focar no incremental
-    print(f"\n--- Buscando Produtos e Estoque (API v2) ---")
     if data_alteracao_inicial:
-         print(f"Filtrando produtos alterados desde: {data_alteracao_inicial}, Página: {pagina}")
+        print(f"--- Buscando Produtos alterados desde: {data_alteracao_inicial}, Página: {pagina} ---")
     else:
-        print(f"Buscando todos os produtos (sem filtro de data), Página: {pagina}")
+        print(f"--- Buscando Todos os Produtos (primeira carga), Página: {pagina} ---")
 
     params = {"pagina": pagina}
     if data_alteracao_inicial:
-        params["dataAlteracaoInicial"] = data_alteracao_inicial 
-    # params["situacao"] = "A" # Pode reativar se quiser filtrar por situação
-
+        params["dataAlteracaoInicial"] = data_alteracao_inicial
+    else: # Para primeira carga, pode ser necessário um termo, ou a API aceita sem filtro de data
+        # params["pesquisa"] = "" # Se "" busca todos. Se a API exigir algum filtro.
+        pass
+        
     retorno_obj, sucesso = make_api_v2_request(ENDPOINT_PRODUTOS_PESQUISA, extra_params=params)
+    produtos_processados_nesta_pagina = 0
     if sucesso and retorno_obj:
         produtos_lista_api = retorno_obj.get("produtos")
         if produtos_lista_api and isinstance(produtos_lista_api, list):
@@ -474,9 +469,9 @@ def search_produtos_v2(conn, data_alteracao_inicial=None, pagina=1):
                     id_produto_atual_api_str = produto_data_lista.get("id")
                     try:
                         id_produto_atual_api = int(id_produto_atual_api_str)
-                        salvar_produto_db(conn, produto_data_lista)
+                        salvar_produto_db(conn, produto_data_lista) # Salva dados básicos
                         
-                        time.sleep(0.7) 
+                        time.sleep(0.6) 
                         dados_estoque_produto_api = get_estoque_produto_v2(id_produto_atual_api)
                         
                         if dados_estoque_produto_api:
@@ -491,15 +486,20 @@ def search_produtos_v2(conn, data_alteracao_inicial=None, pagina=1):
                         else:
                             # Salva com estoque zerado se não conseguiu obter detalhes
                             salvar_produto_estoque_total_db(conn, id_produto_atual_api, produto_data_lista.get("nome"), 0, 0)
-                            print(f"    Produto ID {id_produto_atual_api}: Não foi possível obter dados de estoque detalhados. Estoque total salvo como 0.")
+                            print(f"    Produto ID {id_produto_atual_api}: Detalhes de estoque não obtidos. Estoque total salvo como 0.")
+                        produtos_processados_nesta_pagina += 1
                     except ValueError:
                         print(f"  ERRO: ID do produto '{id_produto_atual_api_str}' não é um número válido.")
+                    except Exception as e_prod_loop:
+                        print(f"  ERRO inesperado no loop de produto {id_produto_atual_api_str}: {e_prod_loop}")
+                        conn.rollback() 
+                        continue 
+            
             conn.commit() 
             print(f"Produtos da página {pagina} e seus estoques processados.")
             return produtos_lista_api, int(retorno_obj.get('numero_paginas', 0))
         else:
-            print(f"  Chave 'produtos' não encontrada ou não é uma lista na resposta da API para esta página.")
-    print(f"\nNão foi possível buscar ou salvar produtos na página {pagina}.")
+            print(f"  Nenhum produto retornado na chave 'produtos' ou não é uma lista (Página {pagina}).")
     return None, 0
 
 def get_detalhes_pedido_v2(id_pedido_api):
@@ -509,25 +509,25 @@ def get_detalhes_pedido_v2(id_pedido_api):
         pedido_detalhe = retorno_obj.get("pedido")
         if pedido_detalhe:
             return pedido_detalhe 
-    print(f"  DETALHES NÃO ENCONTRADOS ou ERRO para pedido ID: {id_pedido_api}")
     return None
 
 def search_pedidos_v2(conn, data_alteracao_ou_inicial=None, pagina=1):
-    print(f"\n--- Buscando e Salvando Pedidos e Seus Itens (API v2) ---")
     if data_alteracao_ou_inicial:
-        print(f"Filtrando pedidos alterados/novos desde: {data_alteracao_ou_inicial}, Página: {pagina}")
+        print(f"--- Buscando Pedidos alterados desde: {data_alteracao_ou_inicial}, Página: {pagina} ---")
     else:
-        print(f"Buscando todos os pedidos (sem filtro de data), Página: {pagina}")
+        print(f"--- Buscando Todos os Pedidos (primeira carga), Página: {pagina} ---")
 
-    params = {"pagina": pagina, "situacao": "aprovado"} # Exemplo, pode querer outras situações
+    params = {"pagina": pagina} 
     if data_alteracao_ou_inicial:
         params["dataAlteracaoInicial"] = data_alteracao_ou_inicial
+    # params["situacao"] = "aprovado" # Adicione se quiser filtrar por situação específica
         
     retorno_obj, sucesso = make_api_v2_request(ENDPOINT_PEDIDOS_PESQUISA, extra_params=params)
+    pedidos_processados_nesta_pagina = 0
     if sucesso and retorno_obj:
         pedidos_lista_api = retorno_obj.get("pedidos")
         if pedidos_lista_api and isinstance(pedidos_lista_api, list):
-            print(f"  Página {pagina}: Encontrados {len(pedidos_lista_api)} pedidos na API.")
+            # print(f"  Página {pagina}: Encontrados {len(pedidos_lista_api)} pedidos na API.")
             for item_pedido in pedidos_lista_api:
                 pedido_data_api = item_pedido.get("pedido")
                 if pedido_data_api:
@@ -541,16 +541,20 @@ def search_pedidos_v2(conn, data_alteracao_ou_inicial=None, pagina=1):
                         if detalhes_pedido and "itens" in detalhes_pedido:
                             lista_de_itens_bruta = detalhes_pedido["itens"]
                             salvar_pedido_itens_db(conn, id_pedido_atual_api, lista_de_itens_bruta)
-                        else:
-                            print(f"    Pedido ID {id_pedido_atual_api}: Não foram encontrados itens nos detalhes ou detalhes_pedido é None.")
+                        # else: # Log já em get_detalhes_pedido_v2
+                        # print(f"    Pedido ID {id_pedido_atual_api}: Não foram encontrados itens nos detalhes.")
+                        pedidos_processados_nesta_pagina +=1
                     except ValueError:
                         print(f"  ERRO: ID do pedido '{id_pedido_atual_api_str}' não é um número válido.")
+                    except Exception as e_ped_loop:
+                        print(f"  ERRO inesperado no loop de pedido {id_pedido_atual_api_str}: {e_ped_loop}")
+                        conn.rollback()
+                        continue 
             conn.commit()
-            print(f"Pedidos (e seus itens) da página {pagina} processados/salvos.")
+            print(f"Pedidos (e seus itens) da página {pagina} processados.")
             return pedidos_lista_api, int(retorno_obj.get('numero_paginas', 0))
         else:
-            print(f"  Chave 'pedidos' não encontrada ou não é uma lista na resposta da API para esta página.")
-    print(f"\nNão foi possível buscar ou salvar pedidos na página {pagina}.")
+            print(f"  Nenhum pedido retornado na chave 'pedidos' ou não é uma lista (Página {pagina}).")
     return None, 0
 
 # --- Bloco Principal de Execução ---
@@ -561,7 +565,7 @@ if __name__ == "__main__":
 
     if not all([API_V2_TOKEN, DB_HOST, DB_NAME, DB_USER, DB_PASSWORD]):
         print("ERRO CRÍTICO: Variáveis de ambiente para API ou Banco de Dados não configuradas.")
-        print("Verifique TINY_API_V2_TOKEN, DB_HOST, DB_NAME, DB_USER, DB_PASSWORD, DB_PORT.")
+        print("Configure: TINY_API_V2_TOKEN, DB_HOST, DB_NAME, DB_USER, DB_PASSWORD, DB_PORT.")
         exit()
 
     db_conn = get_db_connection()
@@ -572,8 +576,8 @@ if __name__ == "__main__":
     try:
         criar_tabelas_db(db_conn)
 
-        # --- PASSO 1: Processar Categorias (Carga Completa sempre) ---
-        print("\nPASSO 1: Processando Categorias")
+        # --- PASSO 1: Processar Categorias ---
+        print("\nPASSO 1: Processando Categorias (Carga completa a cada execução)")
         get_categorias_v2(db_conn) 
         print("-" * 70)
 
@@ -582,44 +586,43 @@ if __name__ == "__main__":
         ultima_exec_produtos_str = get_ultima_execucao(db_conn, PROCESSO_PRODUTOS)
         data_filtro_produtos = ultima_exec_produtos_str if ultima_exec_produtos_str else DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL
         
-        # Para o primeiro teste, vamos buscar todos os produtos e depois filtrar por data.
-        # Em produção, se `data_filtro_produtos` for muito antigo, pode ser melhor limitar.
-        # Se `data_filtro_produtos` for recente, a chamada à API com `dataAlteracaoInicial` buscará menos dados.
-        # A API do Tiny para produtos.pesquisa.php não permite 'pesquisa' e 'dataAlteracaoInicial' juntos.
-        # Portanto, para incremental, filtramos APENAS por data de alteração.
-        
-        print(f"Buscando produtos alterados desde: {data_filtro_produtos} (ou todos se for a primeira carga significativa).")
-        # Para uma carga incremental real, você não usaria termo_pesquisa se estiver usando dataAlteracaoInicial
-        # A função search_produtos_v2 foi ajustada para não usar mais termo_pesquisa internamente se data_alteracao_inicial for passada.
-        
-        produtos_paginados_processados = 0
+        produtos_total_processado_script = 0
         pagina_atual_prod = 1
-        max_paginas_prod_teste = 2 # Limite para teste, aumente para produção
+        max_paginas_prod_teste = 1 # Limite para teste, aumente para produção
         
         while True:
-            if pagina_atual_prod > max_paginas_prod_teste:
+            if max_paginas_prod_teste is not None and pagina_atual_prod > max_paginas_prod_teste:
                 print(f"Atingido limite de {max_paginas_prod_teste} páginas para teste de produtos.")
                 break
             
-            produtos_api, total_paginas_prod = search_produtos_v2(db_conn, 
-                                                                data_alteracao_inicial=data_filtro_produtos if ultima_exec_produtos_str else None, # Só envia se não for a primeiríssima carga
-                                                                pagina=pagina_atual_prod) 
-            if produtos_api:
-                produtos_paginados_processados += len(produtos_api)
-                if pagina_atual_prod >= total_paginas_prod or total_paginas_prod == 0:
-                    print("Todas as páginas de produtos (dentro do limite de teste/disponíveis) foram processadas.")
+            print(f"Processando página {pagina_atual_prod} de produtos (filtro data: {data_filtro_produtos if ultima_exec_produtos_str else 'primeira carga geral'}).")
+            produtos_api_pagina, total_paginas_api = search_produtos_v2(db_conn, 
+                                                                data_alteracao_inicial=data_filtro_produtos if ultima_exec_produtos_str else None,
+                                                                pagina=pagina_atual_prod)
+            if produtos_api_pagina:
+                produtos_total_processado_script += len(produtos_api_pagina)
+                if pagina_atual_prod >= total_paginas_api or total_paginas_api == 0:
+                    print("Todas as páginas de produtos disponíveis foram processadas.")
                     break
                 pagina_atual_prod += 1
-            else:
-                print(f"Nenhum produto encontrado na página {pagina_atual_prod} ou erro na busca. Interrompendo busca de produtos.")
+            else: # Se produtos_api_pagina é None ou lista vazia
+                if total_paginas_api > 0 and pagina_atual_prod < total_paginas_api :
+                    print(f"Nenhum produto retornado para a página {pagina_atual_prod-1}, mas ainda há páginas. Tentando próxima.")
+                    pagina_atual_prod +=1 # Tenta a próxima página
+                else:
+                    print(f"Nenhum produto novo/alterado encontrado ou erro final. Interrompendo busca de produtos.")
+                    break 
+            
+            if max_paginas_prod_teste is not None and pagina_atual_prod > max_paginas_prod_teste: # Verifica de novo após o incremento
+                print(f"Atingido limite de {max_paginas_prod_teste} páginas para teste de produtos (após incremento).")
                 break
-            if pagina_atual_prod <= total_paginas_prod and pagina_atual_prod <= max_paginas_prod_teste: 
-                 print("Pausa de 1 segundo entre páginas de produtos...")
+            if pagina_atual_prod <= total_paginas_api: 
+                 print("Pausa de 1 segundo antes da próxima página de produtos...")
                  time.sleep(1) 
         
-        if produtos_paginados_processados > 0 or ultima_exec_produtos_str is None: 
-             set_ultima_execucao(db_conn, PROCESSO_PRODUTOS)
-        print(f"Total de {produtos_paginados_processados} produtos (cabeçalhos) processados nesta execução.")
+        if produtos_total_processado_script > 0 or ultima_exec_produtos_str is None:
+            set_ultima_execucao(db_conn, PROCESSO_PRODUTOS)
+        print(f"Total de {produtos_total_processado_script} produtos processados/atualizados nesta execução.")
         print("-" * 70)
         
         # --- PASSO 3: Processar Pedidos e seus Itens (Incremental) ---
@@ -627,35 +630,42 @@ if __name__ == "__main__":
         ultima_exec_pedidos_str = get_ultima_execucao(db_conn, PROCESSO_PEDIDOS)
         data_filtro_pedidos = ultima_exec_pedidos_str if ultima_exec_pedidos_str else DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL
         
-        pedidos_paginados_processados = 0
+        pedidos_total_processado_script = 0
         pagina_atual_ped = 1
-        max_paginas_ped_teste = 2 # Limite para teste
+        max_paginas_ped_teste = 1 
         
+        print(f"Iniciando busca de pedidos (alterados desde: {data_filtro_pedidos if ultima_exec_pedidos_str else 'primeira carga geral'}).")
         while True:
-            if pagina_atual_ped > max_paginas_ped_teste:
+            if max_paginas_ped_teste is not None and pagina_atual_ped > max_paginas_ped_teste:
                  print(f"Atingido limite de {max_paginas_ped_teste} páginas para teste de pedidos.")
                  break
             
-            pedidos_api, total_paginas_ped = search_pedidos_v2(db_conn, 
+            pedidos_api_pagina, total_paginas_api_ped = search_pedidos_v2(db_conn, 
                                                             data_alteracao_ou_inicial=data_filtro_pedidos, 
-                                                            pagina=pagina_atual_ped, 
-                                                            situacao="aprovado") # Pode querer outras situações também
-            if pedidos_api:
-                pedidos_paginados_processados += len(pedidos_api)
-                if pagina_atual_ped >= total_paginas_ped or total_paginas_ped == 0:
-                    print("Todas as páginas de pedidos (dentro do limite de teste/disponíveis) foram processadas.")
+                                                            pagina=pagina_atual_ped)
+            if pedidos_api_pagina:
+                pedidos_total_processado_script += len(pedidos_api_pagina)
+                if pagina_atual_ped >= total_paginas_api_ped or total_paginas_api_ped == 0:
+                    print("Todas as páginas de pedidos disponíveis foram processadas.")
                     break
                 pagina_atual_ped += 1
             else:
-                print(f"Nenhum pedido encontrado na página {pagina_atual_ped} ou erro na busca. Interrompendo busca de pedidos.")
+                if total_paginas_api_ped > 0 and pagina_atual_ped < total_paginas_api_ped:
+                    print(f"Nenhum pedido retornado para a página {pagina_atual_ped-1}, mas ainda há páginas. Tentando próxima.")
+                    pagina_atual_ped +=1
+                else:
+                    print(f"Nenhum pedido novo/alterado encontrado ou erro final. Interrompendo busca de pedidos.")
+                    break
+            if max_paginas_ped_teste is not None and pagina_atual_ped > max_paginas_ped_teste:
+                print(f"Atingido limite de {max_paginas_ped_teste} páginas para teste de pedidos (após incremento).")
                 break
-            if pagina_atual_ped <= total_paginas_ped and pagina_atual_ped <= max_paginas_ped_teste: 
-                 print("Pausa de 1 segundo entre páginas de pedidos...")
+            if pagina_atual_ped <= total_paginas_api_ped: 
+                 print("Pausa de 1 segundo antes da próxima página de pedidos...")
                  time.sleep(1) 
         
-        if pedidos_paginados_processados > 0 or ultima_exec_pedidos_str is None: 
+        if pedidos_total_processado_script > 0 or ultima_exec_pedidos_str is None:
             set_ultima_execucao(db_conn, PROCESSO_PEDIDOS)
-        print(f"Total de {pedidos_paginados_processados} cabeçalhos de pedidos processados nesta execução.")
+        print(f"Total de {pedidos_total_processado_script} pedidos processados/atualizados nesta execução.")
         print("-" * 70)
 
         # Contagem final das tabelas
@@ -664,7 +674,7 @@ if __name__ == "__main__":
             tabelas_para_contar = ["categorias", "produtos", "produto_estoque_total", "produto_estoque_depositos", "pedidos", "pedido_itens", "script_ultima_execucao"]
             for tabela in tabelas_para_contar:
                 try:
-                    cur.execute(sql.SQL("SELECT COUNT(*) FROM {}").format(sql.Identifier(tabela)))
+                    cur.execute(sql.SQL("SELECT COUNT(*) FROM {}").format(sql.Identifier(tabela))) # Usando sql.SQL para nomes de tabela seguros
                     count = cur.fetchone()[0]
                     print(f"  - Tabela '{tabela}': {count} registros.")
                 except (Exception, psycopg2.DatabaseError) as e:
