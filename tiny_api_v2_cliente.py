@@ -28,10 +28,9 @@ PROCESSO_CATEGORIAS = "categorias"
 PROCESSO_PRODUTOS = "produtos"
 PROCESSO_PEDIDOS = "pedidos"
 
-# Data inicial para a primeira carga incremental, se nenhum timestamp for encontrado (formato dd/mm/yyyy hh:mm:ss)
-# Use uma data bem antiga para pegar um histórico maior na primeira vez.
-# Se a API não retornar dados muito antigos sem um termo de pesquisa, esta data é o fallback.
-DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2*365)).strftime("%d/%m/%Y %H:%M:%S") # Ex: 2 anos atrás
+# Data inicial para a primeira carga incremental, se nenhum timestamp for encontrado
+DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL = "01/01/2000 00:00:00" # Data bem antiga para buscar histórico
+
 
 # --- Funções de Banco de Dados (PostgreSQL) ---
 
@@ -151,7 +150,6 @@ def get_ultima_execucao(conn, nome_processo):
             cur.execute("SELECT timestamp_ultima_execucao FROM script_ultima_execucao WHERE nome_processo = %s", (nome_processo,))
             resultado = cur.fetchone()
             if resultado and resultado[0]:
-                # Adiciona 1 segundo para evitar reprocessar o mesmo segundo, formato dd/mm/yyyy hh:mm:ss
                 return (resultado[0] + datetime.timedelta(seconds=1)).strftime("%d/%m/%Y %H:%M:%S") 
     except (Exception, psycopg2.DatabaseError) as error:
         print(f"Erro ao buscar última execução para '{nome_processo}': {error}")
@@ -369,20 +367,20 @@ def make_api_v2_request(endpoint_path, method="GET", extra_params=None):
 
     params_sem_token = params.copy(); 
     if "token" in params_sem_token: params_sem_token["token"] = "TOKEN_OCULTADO_NO_LOG"
-    print(f"\nFazendo requisição {method} para: {full_url}\nCom parâmetros: {params_sem_token}")
+    # print(f"\nFazendo requisição {method} para: {full_url}\nCom parâmetros: {params_sem_token}") # Log reduzido
 
     response = None
     try:
         if method.upper() == "GET": response = requests.get(full_url, params=params, timeout=45)
         else: print(f"Método {method} não suportado."); return None, False
         
-        # Log da resposta apenas para obter detalhes de ESTOQUE ou PEDIDO, se precisar depurar
+        # Log da resposta apenas para obter detalhes de ESTOQUE ou PEDIDO (Comentado para reduzir verbosidade)
         # if endpoint_path == ENDPOINT_PRODUTO_OBTER_ESTOQUE or endpoint_path == ENDPOINT_PEDIDO_OBTER:
         #     print(f"\n--- Resposta Bruta de {endpoint_path} (Status: {response.status_code}) ---")
         #     try:
-        #         print(json.dumps(response.json(), indent=2, ensure_ascii=False))
+        #         print(json.dumps(response.json(), indent=2, ensure_ascii=False)) 
         #     except json.JSONDecodeError:
-        #         print(f"Corpo da resposta (não JSON ou erro ao decodificar): {response.text[:200]}...")
+        #         print(f"Corpo da resposta (não JSON): {response.text[:200]}...")
         #     print(f"--- Fim da Resposta Bruta de {endpoint_path} ---")
 
         response.raise_for_status()
@@ -410,9 +408,6 @@ def make_api_v2_request(endpoint_path, method="GET", extra_params=None):
         status_api = retorno_geral.get("status")
         status_processamento = str(retorno_geral.get("status_processamento", ""))
         
-        # if endpoint_path not in [ENDPOINT_PRODUTO_OBTER_ESTOQUE, ENDPOINT_PEDIDO_OBTER]: 
-        # print(f"Status API: {status_api}, Status Processamento: {status_processamento}")
-
         if status_api != "OK":
             print(f"ERRO API Tiny: {status_api} (Endpoint: {endpoint_path})")
             return None, False 
@@ -445,22 +440,14 @@ def get_estoque_produto_v2(id_produto_tiny):
         produto_estoque_data = retorno_obj.get("produto") 
         if produto_estoque_data:
             return produto_estoque_data 
-    # print(f"  Não foi possível buscar dados de estoque para o produto ID: {id_produto_tiny}")
     return None 
 
 def search_produtos_v2(conn, data_alteracao_inicial=None, pagina=1):
-    params = {"pagina": pagina}
+    params = {"pagina": pagina} 
     if data_alteracao_inicial:
-        # print(f"Filtrando produtos alterados desde: {data_alteracao_inicial}, Página: {pagina}")
         params["dataAlteracaoInicial"] = data_alteracao_inicial
-    # else:
-        # print(f"Buscando todos os produtos (primeira carga ou sem filtro de data), Página: {pagina}")
-        # Para buscar todos, a API do Tiny pode exigir um parâmetro 'pesquisa' vazio ou um filtro de data muito antigo.
-        # Se 'dataAlteracaoInicial' não for fornecido, a API pode ter um comportamento padrão.
-        # A API V2 para produtos.pesquisa.php indica que 'pesquisa' é obrigatório, ou outro filtro.
-        # No entanto, os logs mostraram que apenas 'pagina' e 'formato' funcionaram para obter todos.
-        # Se necessário, adicione: params['pesquisa'] = ""
-        pass
+    # else: # Para a primeira carga, a API do Tiny para produtos.pesquisa.php parece funcionar sem 'pesquisa' ou 'dataAlteracaoInicial' se 'pagina' estiver presente.
+    #     print("INFO: Nenhuma data de alteração inicial fornecida, buscando todos os produtos (paginado).")
         
     retorno_obj, sucesso = make_api_v2_request(ENDPOINT_PRODUTOS_PESQUISA, extra_params=params)
     produtos_processados_nesta_pagina = 0
@@ -500,7 +487,7 @@ def search_produtos_v2(conn, data_alteracao_inicial=None, pagina=1):
                         continue 
             
             conn.commit() 
-            print(f"Produtos da página {pagina} e seus estoques processados e salvos.")
+            print(f"Produtos da página {pagina} ({produtos_processados_nesta_pagina} processados) e seus estoques salvos.")
             return produtos_lista_api, int(retorno_obj.get('numero_paginas', 0))
         else:
             print(f"  Nenhum produto retornado na chave 'produtos' ou não é uma lista (Página {pagina}).")
@@ -516,22 +503,15 @@ def get_detalhes_pedido_v2(id_pedido_api):
     return None
 
 def search_pedidos_v2(conn, data_alteracao_ou_inicial=None, pagina=1):
-    if data_alteracao_ou_inicial:
-        print(f"--- Buscando Pedidos alterados desde: {data_alteracao_ou_inicial}, Página: {pagina} ---")
-    else:
-        print(f"--- Buscando Todos os Pedidos (primeira carga), Página: {pagina} ---")
-
     params = {"pagina": pagina} 
     if data_alteracao_ou_inicial:
         params["dataAlteracaoInicial"] = data_alteracao_ou_inicial
-    # params["situacao"] = "aprovado" # Adicione se quiser filtrar por situação específica
         
     retorno_obj, sucesso = make_api_v2_request(ENDPOINT_PEDIDOS_PESQUISA, extra_params=params)
     pedidos_processados_nesta_pagina = 0
     if sucesso and retorno_obj:
         pedidos_lista_api = retorno_obj.get("pedidos")
         if pedidos_lista_api and isinstance(pedidos_lista_api, list):
-            # print(f"  Página {pagina}: Encontrados {len(pedidos_lista_api)} pedidos na API.")
             for item_pedido in pedidos_lista_api:
                 pedido_data_api = item_pedido.get("pedido")
                 if pedido_data_api:
@@ -545,8 +525,6 @@ def search_pedidos_v2(conn, data_alteracao_ou_inicial=None, pagina=1):
                         if detalhes_pedido and "itens" in detalhes_pedido:
                             lista_de_itens_bruta = detalhes_pedido["itens"]
                             salvar_pedido_itens_db(conn, id_pedido_atual_api, lista_de_itens_bruta)
-                        # else:
-                        # print(f"    Pedido ID {id_pedido_atual_api}: Não foram encontrados itens nos detalhes.")
                         pedidos_processados_nesta_pagina +=1
                     except ValueError:
                         print(f"  ERRO: ID do pedido '{id_pedido_atual_api_str}' não é um número válido.")
@@ -555,7 +533,7 @@ def search_pedidos_v2(conn, data_alteracao_ou_inicial=None, pagina=1):
                         conn.rollback()
                         continue 
             conn.commit()
-            print(f"Pedidos (e seus itens) da página {pagina} processados e salvos.")
+            print(f"Pedidos (e seus itens) da página {pagina} ({pedidos_processados_nesta_pagina} processados) salvos.")
             return pedidos_lista_api, int(retorno_obj.get('numero_paginas', 0))
         else:
             print(f"  Nenhum pedido retornado na chave 'pedidos' ou não é uma lista (Página {pagina}).")
@@ -588,19 +566,19 @@ if __name__ == "__main__":
         # --- PASSO 2: Processar Produtos com Estoque (Incremental) ---
         print("\nPASSO 2: Processando Produtos com Estoque")
         ultima_exec_produtos_str = get_ultima_execucao(db_conn, PROCESSO_PRODUTOS)
-        data_filtro_produtos = ultima_exec_produtos_str # Será None na primeira vez
+        data_filtro_produtos = ultima_exec_produtos_str # Será None na primeira vez, ou a data da última execução
         
+        if data_filtro_produtos:
+            print(f"Buscando produtos alterados desde: {data_filtro_produtos}")
+        else:
+            print(f"Primeira carga de produtos ou timestamp não encontrado, buscando desde: {DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL}")
+            data_filtro_produtos = DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL
+
         produtos_total_processado_script = 0
         pagina_atual_prod = 1
-        # Para produção, remova ou aumente muito max_paginas_prod_teste
-        # max_paginas_prod_teste = None # Para buscar todas as páginas
-        max_paginas_prod_teste = 1 # Para teste inicial
-
-        while True:
-            if max_paginas_prod_teste is not None and pagina_atual_prod > max_paginas_prod_teste:
-                print(f"Atingido limite de {max_paginas_prod_teste} páginas para teste de produtos.")
-                break
-            
+        
+        while True: # Loop para todas as páginas de produtos
+            print(f"Processando página {pagina_atual_prod} de produtos...")
             produtos_api_pagina, total_paginas_api = search_produtos_v2(db_conn, 
                                                                 data_alteracao_inicial=data_filtro_produtos, 
                                                                 pagina=pagina_atual_prod)
@@ -611,39 +589,28 @@ if __name__ == "__main__":
                     break
                 pagina_atual_prod += 1
             else: 
-                if total_paginas_api > 0 and pagina_atual_prod < total_paginas_api :
-                    print(f"Nenhum produto retornado para a página {pagina_atual_prod}, mas ainda há páginas ({total_paginas_api}). Tentando próxima.")
-                    pagina_atual_prod +=1 
-                else:
-                    print(f"Nenhum produto novo/alterado encontrado ou erro final. Interrompendo busca de produtos.")
-                    break 
+                print(f"Nenhum produto novo/alterado encontrado na página {pagina_atual_prod} ou erro. Fim da busca de produtos.")
+                break 
             
-            if max_paginas_prod_teste is not None and pagina_atual_prod > max_paginas_prod_teste: 
-                break
-            if pagina_atual_prod <= total_paginas_api: 
+            if pagina_atual_prod <= total_paginas_api : 
                  print("Pausa de 1 segundo antes da próxima página de produtos...")
                  time.sleep(1) 
         
-        if produtos_total_processado_script > 0 or ultima_exec_produtos_str is None:
-            set_ultima_execucao(db_conn, PROCESSO_PRODUTOS)
+        set_ultima_execucao(db_conn, PROCESSO_PRODUTOS) # Atualiza o timestamp após o loop completo
         print(f"Total de {produtos_total_processado_script} produtos processados/atualizados nesta execução.")
         print("-" * 70)
         
         # --- PASSO 3: Processar Pedidos e seus Itens (Incremental) ---
         print("\nPASSO 3: Processando Pedidos e Seus Itens")
         ultima_exec_pedidos_str = get_ultima_execucao(db_conn, PROCESSO_PEDIDOS)
-        data_filtro_pedidos = ultima_exec_pedidos_str 
+        data_filtro_pedidos = ultima_exec_pedidos_str if ultima_exec_pedidos_str else DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL
         
         pedidos_total_processado_script = 0
         pagina_atual_ped = 1
-        max_paginas_ped_teste = 1 
         
-        print(f"Iniciando busca de pedidos (alterados desde: {data_filtro_pedidos if ultima_exec_pedidos_str else 'primeira carga geral'}).")
-        while True:
-            if max_paginas_ped_teste is not None and pagina_atual_ped > max_paginas_ped_teste:
-                 print(f"Atingido limite de {max_paginas_ped_teste} páginas para teste de pedidos.")
-                 break
-            
+        print(f"Iniciando busca de pedidos (alterados desde: {data_filtro_pedidos}).")
+        while True: # Loop para todas as páginas de pedidos
+            print(f"Processando página {pagina_atual_ped} de pedidos...")
             pedidos_api_pagina, total_paginas_api_ped = search_pedidos_v2(db_conn, 
                                                             data_alteracao_ou_inicial=data_filtro_pedidos, 
                                                             pagina=pagina_atual_ped)
@@ -654,20 +621,13 @@ if __name__ == "__main__":
                     break
                 pagina_atual_ped += 1
             else:
-                if total_paginas_api_ped > 0 and pagina_atual_ped < total_paginas_api_ped:
-                    print(f"Nenhum pedido retornado para a página {pagina_atual_ped-1}, mas ainda há páginas. Tentando próxima.")
-                    pagina_atual_ped +=1
-                else:
-                    print(f"Nenhum pedido novo/alterado encontrado ou erro final. Interrompendo busca de pedidos.")
-                    break
-            if max_paginas_ped_teste is not None and pagina_atual_ped > max_paginas_ped_teste:
+                print(f"Nenhum pedido novo/alterado encontrado na página {pagina_atual_ped} ou erro. Fim da busca de pedidos.")
                 break
             if pagina_atual_ped <= total_paginas_api_ped: 
                  print("Pausa de 1 segundo antes da próxima página de pedidos...")
                  time.sleep(1) 
         
-        if pedidos_total_processado_script > 0 or ultima_exec_pedidos_str is None:
-            set_ultima_execucao(db_conn, PROCESSO_PEDIDOS)
+        set_ultima_execucao(db_conn, PROCESSO_PEDIDOS) # Atualiza o timestamp após o loop completo
         print(f"Total de {pedidos_total_processado_script} pedidos processados/atualizados nesta execução.")
         print("-" * 70)
 
@@ -677,7 +637,6 @@ if __name__ == "__main__":
             tabelas_para_contar = ["categorias", "produtos", "produto_estoque_total", "produto_estoque_depositos", "pedidos", "pedido_itens", "script_ultima_execucao"]
             for tabela in tabelas_para_contar:
                 try:
-                    # Usando sql.Identifier para nomes de tabelas seguros
                     cur.execute(sql.SQL("SELECT COUNT(*) FROM {}").format(sql.Identifier(tabela)))
                     count = cur.fetchone()[0]
                     print(f"  - Tabela '{tabela}': {count} registros.")
