@@ -133,7 +133,7 @@ def salvar_categoria_db(conn, categoria_dict, id_pai=None):
                     (cat_id, cat_descricao, id_pai))
             if "nodes" in categoria_dict and isinstance(categoria_dict["nodes"], list):
                 for sub_cat in categoria_dict["nodes"]: salvar_categoria_db(conn, sub_cat, id_pai=cat_id) 
-        except ValueError: logger.warning(f"ID de categoria inválido '{cat_id_str}'. Categoria: {categoria_dict}", exc_info=False)
+        except ValueError: logger.warning(f"ID da categoria inválido '{cat_id_str}'. Categoria: {categoria_dict}", exc_info=False)
         except Exception as e: logger.error(f"Erro PostgreSQL ao salvar categoria ID '{cat_id_str}': {e}", exc_info=True)
 
 def salvar_produto_db(conn, produto_api_data):
@@ -340,11 +340,7 @@ def make_api_v2_request(endpoint_path, method="GET", payload_dict=None,
                 elif erros_api and isinstance(erros_api[0], str): msg_erro = erros_api[0]
                 logger.error(f"API Tiny: Status '{status_api}' (Endpoint: {endpoint_path}). Código: {codigo_erro}. Msg: {msg_erro}. Resp: {str(retorno_geral)[:500]}")
                 if codigo_erro == "2": logger.critical("Token da API Tiny inválido ou expirado.")
-                # Se o código de erro for "35" (erro genérico de consulta), não retentar infinitamente dentro desta função,
-                # mas permitir que o loop de retries principal (para erros de rede/HTTP) tente algumas vezes.
-                # No entanto, para erros da API, o retorno False aqui impede retries do loop while principal para este tipo de falha.
-                # Apenas erros de rede/HTTP caem nos excepts abaixo que permitem o loop.
-                return None, False # Falha da API, geralmente não retentável aqui.
+                return None, False
             if status_processamento not in ["3", "10"]: 
                 msg_proc_err = ""
                 errs_ret = retorno_geral.get("erros", [])
@@ -370,7 +366,7 @@ def make_api_v2_request(endpoint_path, method="GET", payload_dict=None,
             logger.warning(f"Erro de Rede/Timeout (Tentativa {retries_attempted + 1}/{max_retries + 1}) em {endpoint_path}: {type(e_net).__name__} - {e_net}", exc_info=False)
         except requests.exceptions.RequestException as e_req: 
             logger.warning(f"Erro de Requisição (Tentativa {retries_attempted + 1}/{max_retries + 1}) em {endpoint_path}: {type(e_req).__name__} - {e_req}", exc_info=False)
-        except json.JSONDecodeError as e_json: # Captura se response.json() falhar no início
+        except json.JSONDecodeError as e_json:
             logger.error(f"Erro ao decodificar JSON de {endpoint_path} (Tentativa {retries_attempted + 1}/{max_retries + 1}): {e_json}", exc_info=True)
             if response is not None: logger.debug(f"Corpo da Resposta (não JSON): {response.text[:500]}")
             return None, False 
@@ -384,7 +380,6 @@ def make_api_v2_request(endpoint_path, method="GET", payload_dict=None,
             return None, False
     return None, False
 
-# --- Funções de Lógica de Negócio (Busca e Salvamento) ---
 def get_categorias_v2(conn):
     """Busca todas as categorias da API e as salva no banco."""
     logger.info("Iniciando busca e salvamento de Categorias.")
@@ -433,7 +428,7 @@ def search_produtos_v2(conn, data_alteracao_inicial=None, pagina=1):
             id_prod_str = str(prod_d.get("id","")).strip()
             try:
                 id_prod_int = int(id_prod_str); salvar_produto_db(conn, prod_d)
-                time.sleep(0.5) # Pausa antes de buscar detalhes do produto
+                time.sleep(0.5)
                 det_prod = get_produto_detalhes_v2(id_prod_int)
                 if det_prod and "categorias" in det_prod: salvar_produto_categorias_db(conn, id_prod_int, det_prod["categorias"])
                 salvos_pag += 1
@@ -444,14 +439,11 @@ def search_produtos_v2(conn, data_alteracao_inicial=None, pagina=1):
                 pag_ok_db = True
             except Exception as e: 
                 logger.error(f"Erro CRÍTICO ao commitar pág {pagina} produtos: {e}", exc_info=True);
-                if conn and not conn.closed: conn.rollback() # Tenta rollback se o commit falhou
-                # pag_ok_db permanece False se o commit falhar
+                if conn and not conn.closed: conn.rollback() 
         elif not todos_ok and conn and not conn.closed: conn.rollback(); logger.warning(f"Pág {pagina} produtos com erros. ROLLBACK.")
-        # Se salvos_pag == 0 mas todos_ok é True (ex: página vazia), pag_ok_db permanece False mas não é um erro de rollback.
-        # A função chamadora decide se continua baseada em pag_ok_db e se prods_pag_api é None.
         return prods_pag_api, num_pags_tot, pag_ok_db
     logger.info(f"Nenhum produto na API para pág {pagina} ou estrutura inválida.")
-    return [], num_pags_tot, True # Página vazia é "OK" para continuar paginação.
+    return [], num_pags_tot, True
 
 def processar_atualizacoes_estoque_v2(conn, data_alteracao_estoque_inicial=None, pagina=1):
     """Busca atualizações de estoque e salva. Retorna (lista_api, num_pags, sucesso_db_pag)."""
@@ -471,21 +463,23 @@ def processar_atualizacoes_estoque_v2(conn, data_alteracao_estoque_inicial=None,
             try:
                 if not id_prod_str or not id_prod_str.isdigit(): logger.warning(f"ID produto inválido (estoque): '{id_prod_str}'. Dados: {prod_est_d}"); continue
                 id_prod_int = int(id_prod_str)
-                # VERIFICA SE O PRODUTO EXISTE ANTES DE SALVAR ESTOQUE
+                
                 produto_existe_no_db = False
-                with conn.cursor() as cur_chk: cur_chk.execute("SELECT 1 FROM produtos WHERE id_produto = %s", (id_prod_int,)); prod_exists = cur_chk.fetchone()
-                if prod_exists: produto_existe_no_db = True
+                with conn.cursor() as cur_chk: # Usar um novo cursor para a verificação
+                    cur_chk.execute("SELECT 1 FROM produtos WHERE id_produto = %s", (id_prod_int,)); 
+                    if cur_chk.fetchone(): produto_existe_no_db = True
                 
                 if not produto_existe_no_db:
                     logger.warning(f"Produto ID {id_prod_int} (da lista de estoque) não encontrado na tabela 'produtos'. O estoque para este produto específico será pulado nesta passagem.")
-                    continue # Pula para o próximo item de estoque, não quebra o loop da página nem marca como erro total da página
-                
+                    continue # Pula este item de estoque, mas continua processando a página
+
                 salvar_produto_estoque_total_db(conn, id_prod_int, prod_est_d.get("nome", f"Produto ID {id_prod_int}"), 
                                                 prod_est_d.get("saldo"), prod_est_d.get("saldoReservado"), prod_est_d.get("data_alteracao"))
                 deps = prod_est_d.get("depositos", [])
                 salvar_estoque_por_deposito_db(conn, id_prod_int, prod_est_d.get("nome", f"Produto ID {id_prod_int}"), deps)
                 salvos_pag += 1
             except Exception as e: logger.error(f"Erro no estoque produto ID {id_prod_str} (pág {pagina}): {e}", exc_info=True); todos_ok=False; break
+        
         if todos_ok and salvos_pag > 0:
             try:
                 if conn and not conn.closed: conn.commit(); logger.info(f"Pág {pagina} estoques ({salvos_pag} itens) commitada.")
@@ -494,6 +488,10 @@ def processar_atualizacoes_estoque_v2(conn, data_alteracao_estoque_inicial=None,
                 logger.error(f"Erro CRÍTICO ao commitar pág {pagina} estoques: {e}", exc_info=True);
                 if conn and not conn.closed: conn.rollback()
         elif not todos_ok and conn and not conn.closed: conn.rollback(); logger.warning(f"Pág {pagina} estoques com erros. ROLLBACK.")
+        elif todos_ok and salvos_pag == 0 and prods_est_api : # Nenhum salvo, mas sem erro que quebrou o loop (ex: todos os produtos não existiam)
+             logger.info(f"Pág {pagina} de estoques processada, mas nenhum item de estoque foi efetivamente salvo (ex: produtos não cadastrados).")
+             pag_ok_db = True # Considera a página "OK" para o loop principal avançar o timestamp de estoques
+        
         return prods_est_api, num_pags_tot, pag_ok_db
     logger.info(f"Nenhuma atualização de estoque na API para pág {pagina} ou estrutura inválida.")
     return [], num_pags_tot, True
@@ -540,7 +538,6 @@ def search_pedidos_v2(conn, data_alteracao_ou_inicial=None, pagina=1):
     logger.info(f"Nenhum pedido na API para pág {pagina} ou estrutura inválida.")
     return [], num_pags_tot, True
 
-
 # --- Bloco Principal de Execução ---
 if __name__ == "__main__":
     logger.info("=== Iniciando Cliente para API v2 do Tiny ERP (PostgreSQL, Incremental) ===")
@@ -551,7 +548,7 @@ if __name__ == "__main__":
         exit(1)
 
     db_conn = get_db_connection()
-    if db_conn is None or (hasattr(db_conn, 'closed') and db_conn.closed): # Verifica se a conexão é None ou já está fechada
+    if db_conn is None or (hasattr(db_conn, 'closed') and db_conn.closed):
         logger.critical("Falha na conexão com o banco de dados. Encerrando.")
         exit(1)
     
@@ -574,7 +571,7 @@ if __name__ == "__main__":
             logger.info(f"Processando pág {pag_prod} de produtos (cadastrais)...")
             prods_pag, total_pags, pag_commit = search_produtos_v2(db_conn, data_filtro_prod, pag_prod)
             if prods_pag is None: logger.error(f"Falha crítica (API) pág {pag_prod} produtos. Interrompendo."); etapa_prod_ok=False; break 
-            if not pag_commit and prods_pag: logger.warning(f"Pág {pag_prod} produtos não commitada. Interrompendo."); etapa_prod_ok=False; break
+            if not pag_commit and prods_pag: logger.warning(f"Pág {pag_prod} produtos não commitada devido a erros. Interrompendo etapa."); etapa_prod_ok=False; break
             if prods_pag: total_prods_listados += len(prods_pag) 
             if total_pags == 0 or pag_prod >= total_pags: logger.info("Todas as págs de produtos (cadastrais) processadas."); break
             pag_prod += 1
@@ -593,8 +590,6 @@ if __name__ == "__main__":
 
         if ultima_exec_est_str:
             try:
-                # Convertendo string para datetime. Presume-se que a string de get_ultima_execucao não tem timezone.
-                # Adicionamos UTC para consistência com data_lim_est_api que é UTC.
                 ult_exec_obj_naive = datetime.datetime.strptime(ultima_exec_est_str, "%d/%m/%Y %H:%M:%S")
                 ult_exec_obj_utc = ult_exec_obj_naive.replace(tzinfo=datetime.timezone.utc)
                 
@@ -617,7 +612,7 @@ if __name__ == "__main__":
             logger.info(f"Processando pág {pag_est} de atualizações de estoque...")
             est_pag, total_pags_est, pag_commit_est = processar_atualizacoes_estoque_v2(db_conn,data_filtro_est_api,pag_est)
             if est_pag is None: logger.error(f"Falha crítica (API) pág {pag_est} estoques. Interrompendo."); etapa_est_ok=False; break
-            if not pag_commit_est and est_pag: logger.warning(f"Pág {pag_est} estoques não commitada. Interrompendo."); etapa_est_ok=False; break
+            if not pag_commit_est and est_pag: logger.warning(f"Pág {pag_est} estoques não commitada devido a erros. Interrompendo etapa."); etapa_est_ok=False; break
             if est_pag: total_est_listados += len(est_pag)
             if total_pags_est == 0 or pag_est >= total_pags_est: logger.info("Todas as págs de estoques processadas."); break
             pag_est += 1
@@ -643,7 +638,7 @@ if __name__ == "__main__":
             if peds_pag is None: 
                 logger.error(f"Falha crítica (API) pág {pag_ped} pedidos. Interrompendo."); etapa_peds_ok=False; break
             if not pag_commit_ped and peds_pag: 
-                logger.warning(f"Pág {pag_ped} pedidos não commitada. Interrompendo."); etapa_peds_ok=False; break
+                logger.warning(f"Pág {pag_ped} pedidos não commitada devido a erros. Interrompendo etapa."); etapa_peds_ok=False; break
             if peds_pag: 
                 total_peds_listados += len(peds_pag)
             if total_pags_ped == 0 or pag_ped >= total_pags_ped: 
@@ -673,12 +668,14 @@ if __name__ == "__main__":
             
     except KeyboardInterrupt:
         logger.warning("Processo interrompido (KeyboardInterrupt).")
-        if db_conn and not db_conn.closed: try: db_conn.rollback(); logger.info("Rollback por KI.")
-        except Exception as e: logger.error(f"Erro no rollback KI: {e}", exc_info=True)
+        if db_conn and not db_conn.closed: 
+            try: db_conn.rollback(); logger.info("Rollback por KI.")
+            except Exception as e: logger.error(f"Erro no rollback KI: {e}", exc_info=True)
     except Exception as e_geral:
         logger.critical(f"ERRO GERAL NO PROCESSAMENTO: {e_geral}", exc_info=True)
-        if db_conn and not db_conn.closed: try: db_conn.rollback(); logger.info("Rollback por erro geral.")
-        except Exception as e: logger.error(f"Erro no rollback geral: {e}", exc_info=True)
+        if db_conn and not db_conn.closed: 
+            try: db_conn.rollback(); logger.info("Rollback por erro geral.")
+            except Exception as e: logger.error(f"Erro no rollback geral: {e}", exc_info=True)
     finally:
         if db_conn and not (hasattr(db_conn, 'closed') and db_conn.closed):
             db_conn.close(); logger.info("Conexão PostgreSQL fechada.")
