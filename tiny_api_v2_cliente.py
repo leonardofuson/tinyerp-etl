@@ -39,13 +39,15 @@ ENDPOINT_PEDIDO_OBTER = "/pedido.obter.php"
 
 # Nome dos processos para controle de última execução
 PROCESSO_CATEGORIAS = "categorias"
-PROCESSO_PRODUTOS = "produtos_cadastrais"
+PROCESSO_PRODUTOS = "produtos" # Mantido como "produtos" para continuidade se já existia no DB
 PROCESSO_ESTOQUES = "estoques"
 PROCESSO_PEDIDOS = "pedidos"
 
-DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL = "01/01/2000 00:00:00"
-DEFAULT_API_TIMEOUT = 60 # Timeout padrão para requisições à API
-RETRY_DELAY_429 = 30 # Delay específico em segundos para erro 429
+# Alterado conforme solicitado para produtos e pedidos na primeira carga.
+# Estoque terá tratamento especial devido à limitação da API.
+DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL = "01/10/2024 00:00:00"
+DEFAULT_API_TIMEOUT = 60 
+RETRY_DELAY_429 = 30 
 
 # --- Função Auxiliar para Conversão ---
 def safe_float_convert(value_str, default=0.0):
@@ -62,7 +64,7 @@ def safe_float_convert(value_str, default=0.0):
         return default
 
 # --- Funções de Banco de Dados (PostgreSQL) ---
-
+# Estas funções permanecem as mesmas da versão anterior
 def get_db_connection():
     """Estabelece e retorna uma conexão com o banco de dados PostgreSQL."""
     conn = None
@@ -73,7 +75,7 @@ def get_db_connection():
             user=DB_USER,
             password=DB_PASSWORD,
             port=DB_PORT,
-            connect_timeout=10 # Timeout para estabelecer conexão
+            connect_timeout=10 
         )
         logger.info("Conexão com PostgreSQL estabelecida com sucesso.")
     except Exception as e:
@@ -82,7 +84,6 @@ def get_db_connection():
 
 def criar_tabelas_db(conn):
     """Cria as tabelas no banco de dados se elas não existirem."""
-    # ... (definição dos comandos DDL como na versão anterior) ...
     commands = (
         """
         CREATE TABLE IF NOT EXISTS categorias (
@@ -222,10 +223,11 @@ def set_ultima_execucao(conn, nome_processo, timestamp=None):
             conn.rollback()
 
 # --- Funções de Salvamento no Banco de Dados ---
+# Estas funções (salvar_categoria_db, salvar_produto_db, etc.) permanecem as mesmas da versão anterior.
+# Vou incluir uma delas como exemplo, as outras são idênticas à versão anterior.
 
 def salvar_categoria_db(conn, categoria_dict, id_pai=None):
     """Salva uma categoria e suas subcategorias recursivamente no banco de dados."""
-    # ... (código como na versão anterior) ...
     cat_id_str = categoria_dict.get("id") 
     cat_descricao = categoria_dict.get("descricao")
     if cat_id_str and cat_descricao: 
@@ -247,10 +249,8 @@ def salvar_categoria_db(conn, categoria_dict, id_pai=None):
         except (Exception, psycopg2.DatabaseError) as error: 
             logger.error(f"Erro PostgreSQL ao inserir/atualizar categoria ID '{cat_id_str}': {error}", exc_info=True)
 
-
 def salvar_produto_db(conn, produto_api_data):
     """Salva os dados cadastrais de um produto no banco."""
-    # ... (código como na versão anterior, usando safe_float_convert) ...
     id_produto_str = str(produto_api_data.get("id","")).strip()
     if not id_produto_str or not id_produto_str.isdigit():
         logger.error(f"ID do produto inválido ou ausente: '{id_produto_str}'. Dados: {produto_api_data}")
@@ -310,7 +310,6 @@ def salvar_produto_db(conn, produto_api_data):
 
 def salvar_produto_categorias_db(conn, id_produto, categorias_lista_api):
     """Salva o relacionamento entre um produto e suas categorias usando execute_values."""
-    # ... (código como na versão anterior, usando execute_values) ...
     if not isinstance(id_produto, int):
         logger.error(f"ID do produto inválido para salvar categorias: {id_produto}")
         raise ValueError("ID do produto inválido para salvar categorias.")
@@ -342,7 +341,6 @@ def salvar_produto_categorias_db(conn, id_produto, categorias_lista_api):
 
 def salvar_produto_estoque_total_db(conn, id_produto, nome_produto, saldo_total_api, saldo_reservado_api, data_ultima_atualizacao_estoque=None):
     """Salva o estoque total de um produto."""
-    # ... (código como na versão anterior, com conversão de data_ultima_atualizacao_estoque) ...
     id_produto_int = int(id_produto)
     try:
         saldo_total = safe_float_convert(saldo_total_api)
@@ -354,7 +352,7 @@ def salvar_produto_estoque_total_db(conn, id_produto, nome_produto, saldo_total_
         elif isinstance(data_ultima_atualizacao_estoque, str): 
             try:
                 dt_obj = datetime.datetime.strptime(data_ultima_atualizacao_estoque, "%d/%m/%Y %H:%M:%S")
-                data_ultima_att_db = dt_obj.replace(tzinfo=datetime.timezone.utc) # Adiciona UTC
+                data_ultima_att_db = dt_obj.replace(tzinfo=datetime.timezone.utc) 
             except ValueError:
                 logger.warning(f"Formato de data_ultima_atualizacao_estoque ('{data_ultima_atualizacao_estoque}') inválido para produto {id_produto_int}. Usando data/hora atual.")
                 data_ultima_att_db = datetime.datetime.now(datetime.timezone.utc)
@@ -379,11 +377,10 @@ def salvar_produto_estoque_total_db(conn, id_produto, nome_produto, saldo_total_
         logger.debug(f"Estoque total para produto ID {id_produto_int} salvo.")
     except (ValueError, psycopg2.DatabaseError, Exception) as error:
         logger.error(f"Erro ao salvar estoque total para Produto ID {id_produto}: {error}", exc_info=True)
-        raise
+        raise 
 
 def salvar_estoque_por_deposito_db(conn, id_produto, nome_produto, lista_depositos_api):
     """Salva o estoque por depósito de um produto."""
-    # ... (código como na versão anterior) ...
     id_produto_int = int(id_produto)
     try:
         with conn.cursor() as cur:
@@ -422,11 +419,10 @@ def salvar_estoque_por_deposito_db(conn, id_produto, nome_produto, lista_deposit
 
     except (ValueError, psycopg2.DatabaseError, Exception) as error:
         logger.error(f"Erro na operação de estoque por depósito para produto ID {id_produto}: {error}", exc_info=True)
-        raise
+        raise 
 
 def salvar_pedido_db(conn, pedido_api_data):
     """Salva os dados de um pedido no banco."""
-    # ... (código como na versão anterior) ...
     id_pedido_str = str(pedido_api_data.get("id", "")).strip()
     if not id_pedido_str or not id_pedido_str.isdigit():
         logger.error(f"ID do pedido inválido ou ausente: '{id_pedido_str}'. Dados: {pedido_api_data}")
@@ -470,7 +466,6 @@ def salvar_pedido_db(conn, pedido_api_data):
 
 def salvar_pedido_itens_db(conn, id_pedido_api, itens_lista_api):
     """Salva os itens de um pedido no banco usando execute_values."""
-    # ... (código como na versão anterior, usando execute_values) ...
     id_pedido_int = int(id_pedido_api)
     try:
         with conn.cursor() as cur:
@@ -502,7 +497,7 @@ def salvar_pedido_itens_db(conn, id_pedido_api, itens_lista_api):
                         id_pedido, id_produto_tiny, codigo_produto_pedido, descricao_produto_pedido,
                         quantidade, unidade_pedido, valor_unitario_pedido, id_grade_pedido
                     ) VALUES %s
-                """ # ON CONFLICT não é necessário aqui pois estamos deletando antes.
+                """
                 execute_values(cur, query_insert_itens, dados_para_inserir_itens)
                 logger.debug(f"{len(dados_para_inserir_itens)} itens salvos para pedido ID {id_pedido_int}.")
 
@@ -512,11 +507,10 @@ def salvar_pedido_itens_db(conn, id_pedido_api, itens_lista_api):
 
 # --- Funções da API ---
 def make_api_v2_request(endpoint_path, method="GET", payload_dict=None, 
-                        max_retries=3, initial_retry_delay=2, timeout_seconds=DEFAULT_API_TIMEOUT): # Adicionado timeout_seconds
+                        max_retries=3, initial_retry_delay=2, timeout_seconds=DEFAULT_API_TIMEOUT):
     """
     Realiza uma requisição para a API v2 do Tiny ERP.
     """
-    # ... (código como na versão anterior, mas usando timeout_seconds e tratando HTTP 429 com delay maior) ...
     full_url = f"{BASE_URL_V2}{endpoint_path}"
     base_params = {"token": API_V2_TOKEN, "formato": "json"}
     all_params = base_params.copy()
@@ -532,12 +526,14 @@ def make_api_v2_request(endpoint_path, method="GET", payload_dict=None,
         response = None 
         try:
             if retries_attempted > 0: 
-                actual_delay_this_retry = current_delay
-                # Tratamento específico para 429 pode ter ajustado current_delay para ser maior já na primeira retry
-                # (removido ajuste de current_delay para 429 daqui, será tratado no except HTTPError)
-                logger.info(f"Aguardando {actual_delay_this_retry}s antes da tentativa {retries_attempted + 1}/{max_retries + 1} para {endpoint_path}...")
-                time.sleep(actual_delay_this_retry)
-                current_delay = min(current_delay * 2, 30) # Aumenta para a *próxima* tentativa, se houver
+                actual_retry_delay = current_delay
+                # Se o erro anterior foi 429, current_delay já foi ajustado para RETRY_DELAY_429
+                logger.info(f"Aguardando {actual_retry_delay}s antes da tentativa {retries_attempted + 1}/{max_retries + 1} para {endpoint_path}...")
+                time.sleep(actual_retry_delay)
+                # O backoff exponencial só aumenta se não foi um 429 que setou um delay fixo maior
+                if actual_retry_delay < RETRY_DELAY_429 : # Evita dobrar o delay_429 desnecessariamente
+                    current_delay = min(current_delay * 2, 30)
+
 
             logger.debug(f"Tentativa {retries_attempted + 1}/{max_retries + 1} - {method} {full_url} - Params: {params_log}")
             
@@ -566,7 +562,6 @@ def make_api_v2_request(endpoint_path, method="GET", payload_dict=None,
                 return None, False 
 
             if endpoint_path == ENDPOINT_CATEGORIAS:
-                # ... (lógica de categorias como antes) ...
                 if isinstance(retorno_geral, list): return retorno_geral, True 
                 if isinstance(retorno_geral, dict):
                     if retorno_geral.get("status") == "OK" and "categorias" in retorno_geral and isinstance(retorno_geral["categorias"], list):
@@ -586,7 +581,6 @@ def make_api_v2_request(endpoint_path, method="GET", payload_dict=None,
             status_processamento = str(retorno_geral.get("status_processamento", ""))
             
             if status_api != "OK":
-                # ... (lógica de erro da API como antes) ...
                 erros_api = retorno_geral.get("erros") 
                 codigo_erro_interno = ""
                 msg_erro_interno = ""
@@ -607,7 +601,6 @@ def make_api_v2_request(endpoint_path, method="GET", payload_dict=None,
                 return None, False
 
             if status_processamento not in ["3", "10"]: 
-                # ... (lógica de status de processamento como antes) ...
                 msg_erro_proc = ""
                 erros_retorno = retorno_geral.get("erros")
                 if isinstance(erros_retorno, list) and erros_retorno:
@@ -631,12 +624,11 @@ def make_api_v2_request(endpoint_path, method="GET", payload_dict=None,
             logger.warning(f"Erro HTTP (Tentativa {retries_attempted + 1}/{max_retries + 1}) em {endpoint_path}: {e_http}", exc_info=False)
             if response is not None: 
                 logger.debug(f"Corpo da Resposta HTTP: {response.text[:500]}")
-                if response.status_code == 429: # Too Many Requests
-                    logger.warning(f"Limite de taxa (429) atingido para {endpoint_path}. Próxima tentativa com delay maior ({RETRY_DELAY_429}s).")
-                    current_delay = RETRY_DELAY_429 # Força um delay maior para a próxima tentativa
-                elif 400 <= response.status_code < 500: # Outros erros 4xx não são retentáveis
+                if response.status_code == 429:
+                    logger.warning(f"Limite de taxa (429) atingido para {endpoint_path}. Próxima tentativa com delay de {RETRY_DELAY_429}s.")
+                    current_delay = RETRY_DELAY_429 # Força um delay maior para a próxima tentativa específica de 429
+                elif 400 <= response.status_code < 500:
                     return None, False 
-            # Para 5xx ou 429 (com delay ajustado), permite retentativa
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.ChunkedEncodingError) as e_net:
             logger.warning(f"Erro de Rede/Timeout (Tentativa {retries_attempted + 1}/{max_retries + 1}) em {endpoint_path}: {type(e_net).__name__} - {e_net}", exc_info=False)
         except requests.exceptions.RequestException as e_req: 
@@ -657,10 +649,13 @@ def make_api_v2_request(endpoint_path, method="GET", payload_dict=None,
     return None, False
 
 # --- Funções de Lógica de Negócio (Busca e Salvamento) ---
+# As funções get_categorias_v2, get_produto_detalhes_v2, search_produtos_v2, 
+# processar_atualizacoes_estoque_v2, get_detalhes_pedido_v2, search_pedidos_v2
+# permanecem as mesmas da versão anterior (já usam logger e têm a lógica de transação por página)
+# Vou incluir uma delas como exemplo, as outras são idênticas à versão anterior.
 
 def get_categorias_v2(conn):
     """Busca todas as categorias da API e as salva no banco."""
-    # ... (código como na versão anterior) ...
     logger.info("Iniciando busca e salvamento de Categorias.")
     lista_categorias_api, sucesso_api = make_api_v2_request(ENDPOINT_CATEGORIAS)
     
@@ -704,7 +699,6 @@ def get_categorias_v2(conn):
 
 def get_produto_detalhes_v2(id_produto_tiny):
     """Busca os detalhes de um produto específico, incluindo suas categorias."""
-    # ... (código como na versão anterior) ...
     logger.debug(f"Buscando detalhes para o produto ID {id_produto_tiny}...")
     params_api = {"id": id_produto_tiny}
     retorno_obj, sucesso = make_api_v2_request(ENDPOINT_PRODUTO_OBTER, payload_dict=params_api)
@@ -721,7 +715,6 @@ def search_produtos_v2(conn, data_alteracao_inicial=None, pagina=1):
     Busca produtos alterados na API (dados cadastrais e categorias) e os salva.
     Retorna: (lista_de_produtos_api, num_total_paginas_api, sucesso_pagina_db)
     """
-    # ... (código como na versão anterior, com verificação de conn.closed) ...
     logger.info(f"Buscando página {pagina} de produtos alterados desde {data_alteracao_inicial or 'inicio'}.")
     params_pesquisa = {"pagina": pagina}
     if data_alteracao_inicial:
@@ -750,9 +743,9 @@ def search_produtos_v2(conn, data_alteracao_inicial=None, pagina=1):
                 logger.warning(f"Item de produto malformado na API (pág {pagina}): {produto_wrapper_api}")
                 continue
 
-            id_produto_str = str(produto_data_api.get("id","")).strip() # Usado para logging em caso de erro no int()
+            id_produto_str = str(produto_data_api.get("id","")).strip() 
             try:
-                id_produto_int = int(id_produto_str) # Validação primária do ID
+                id_produto_int = int(id_produto_str) 
                 salvar_produto_db(conn, produto_data_api)
                 
                 time.sleep(0.5) 
@@ -791,7 +784,6 @@ def processar_atualizacoes_estoque_v2(conn, data_alteracao_estoque_inicial=None,
     Busca atualizações de estoque da API e salva.
     Retorna: (lista_produtos_com_estoque, num_total_paginas, sucesso_pagina_db)
     """
-    # ... (código como na versão anterior, com conversão de data e verificação de conn.closed) ...
     logger.info(f"Buscando página {pagina} de atualizações de estoque desde {data_alteracao_estoque_inicial or 'inicio'}.")
     params_pesquisa = {"pagina": pagina}
     if data_alteracao_estoque_inicial:
@@ -830,9 +822,9 @@ def processar_atualizacoes_estoque_v2(conn, data_alteracao_estoque_inicial=None,
                 nome_produto = produto_estoque_data.get("nome", f"Produto ID {id_produto_int}")
                 saldo_total = produto_estoque_data.get("saldo")
                 saldo_reservado = produto_estoque_data.get("saldoReservado")
-                data_att_estoque_str = produto_estoque_data.get("data_alteracao")
+                data_att_estoque_str = produto_estoque_data.get("data_alteracao") 
                 
-                salvar_produto_estoque_total_db(conn, id_produto_int, nome_produto, saldo_total, saldo_reservado, data_att_estoque_str) # Passa a string da data
+                salvar_produto_estoque_total_db(conn, id_produto_int, nome_produto, saldo_total, saldo_reservado, data_att_estoque_str)
                 
                 lista_depositos_api = produto_estoque_data.get("depositos")
                 if lista_depositos_api:
@@ -865,10 +857,8 @@ def processar_atualizacoes_estoque_v2(conn, data_alteracao_estoque_inicial=None,
     logger.info(f"Nenhuma atualização de estoque retornada pela API para a página {pagina} ou estrutura inválida.")
     return [], num_paginas_total_api, True
 
-
 def get_detalhes_pedido_v2(id_pedido_api):
     """Busca os detalhes de um pedido específico, incluindo seus itens."""
-    # ... (código como na versão anterior) ...
     logger.debug(f"Buscando detalhes para o pedido ID {id_pedido_api}...")
     params_api = {"id": id_pedido_api} 
     retorno_obj, sucesso = make_api_v2_request(ENDPOINT_PEDIDO_OBTER, payload_dict=params_api)
@@ -885,7 +875,6 @@ def search_pedidos_v2(conn, data_alteracao_ou_inicial=None, pagina=1):
     Busca pedidos alterados na API e os salva, incluindo seus itens.
     Retorna: (lista_de_pedidos_api, num_total_paginas_api, sucesso_pagina_db)
     """
-    # ... (código como na versão anterior, com verificação de conn.closed) ...
     logger.info(f"Buscando página {pagina} de pedidos alterados desde {data_alteracao_ou_inicial or 'inicio'}.")
     params_pesquisa = {"pagina": pagina} 
     if data_alteracao_ou_inicial:
@@ -914,9 +903,9 @@ def search_pedidos_v2(conn, data_alteracao_ou_inicial=None, pagina=1):
                 logger.warning(f"Item de pedido malformado na API (pág {pagina}): {pedido_wrapper_api}")
                 continue
 
-            id_pedido_str = str(pedido_data_api.get("id","")).strip() # Usado para logging em caso de erro no int()
+            id_pedido_str = str(pedido_data_api.get("id","")).strip() 
             try:
-                id_pedido_int = int(id_pedido_str) # Validação primária do ID
+                id_pedido_int = int(id_pedido_str) 
                 salvar_pedido_db(conn, pedido_data_api)
                 
                 time.sleep(0.6) 
@@ -956,14 +945,13 @@ if __name__ == "__main__":
     logger.info("=== Iniciando Cliente para API v2 do Tiny ERP (PostgreSQL, Incremental) ===")
     start_time_total = time.time()
 
-    # ... (código como na versão anterior, com verificações de conn.closed) ...
     if not all([API_V2_TOKEN, DB_HOST, DB_NAME, DB_USER, DB_PASSWORD]):
         logger.critical("Variáveis de ambiente para API ou Banco de Dados não configuradas. Encerrando.")
         logger.critical("Configure: TINY_API_V2_TOKEN, DB_HOST, DB_NAME, DB_USER, DB_PASSWORD, DB_PORT.")
         exit(1)
 
     db_conn = get_db_connection()
-    if db_conn is None or db_conn.closed: # Verifica se a conexão foi bem sucedida e está aberta
+    if db_conn is None or (hasattr(db_conn, 'closed') and db_conn.closed):
         logger.critical("Não foi possível conectar ao banco de dados PostgreSQL ou conexão fechada. Encerrando.")
         exit(1)
     
@@ -981,6 +969,7 @@ if __name__ == "__main__":
         # PASSO 2: Produtos Cadastrais e Categorias de Produtos
         logger.info("--- INICIANDO PASSO 2: Processamento de Produtos (Cadastrais e Categorias) ---")
         ultima_exec_produtos_str = get_ultima_execucao(db_conn, PROCESSO_PRODUTOS)
+        # Usa a nova DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL se não houver último timestamp
         data_filtro_produtos = ultima_exec_produtos_str if ultima_exec_produtos_str else DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL
         
         produtos_cad_total_listados_api = 0
@@ -1024,20 +1013,61 @@ if __name__ == "__main__":
 
         # PASSO 3: Atualizações de Estoque
         logger.info("--- INICIANDO PASSO 3: Processamento de Atualizações de Estoque ---")
-        ultima_exec_estoques_str = get_ultima_execucao(db_conn, PROCESSO_ESTOQUES)
-        data_filtro_estoques = ultima_exec_estoques_str if ultima_exec_estoques_str else DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL
+        ultima_exec_estoques_str_db = get_ultima_execucao(db_conn, PROCESSO_ESTOQUES)
+        data_filtro_estoques_para_api = None
+        hoje_utc_est = datetime.datetime.now(datetime.timezone.utc)
+        limite_api_dias_est = 29 
+        data_limite_api_est = hoje_utc_est - datetime.timedelta(days=limite_api_dias_est)
+
+        if ultima_exec_estoques_str_db:
+            try:
+                ultima_exec_obj_est = datetime.datetime.strptime(ultima_exec_estoques_str_db, "%d/%m/%Y %H:%M:%S")
+                ultima_exec_obj_est_utc = ultima_exec_obj_est.replace(tzinfo=datetime.timezone.utc) # Assume que strptime é naive
+
+                if ultima_exec_obj_est_utc < data_limite_api_est: # Compara datetimes cientes de fuso
+                    logger.warning(
+                        f"A última sincronização de estoque ({ultima_exec_estoques_str_db}) ocorreu há mais de {limite_api_dias_est} dias."
+                    )
+                    logger.warning(
+                        f"Devido à limitação da API (máx. 30 dias), o filtro de estoque será ajustado para os últimos {limite_api_dias_est} dias "
+                        f"({data_limite_api_est.strftime('%d/%m/%Y %H:%M:%S')})."
+                    )
+                    logger.warning(
+                        "Pode haver uma lacuna nos dados de histórico de estoque se o script não rodou por um período estendido."
+                    )
+                    data_filtro_estoques_para_api = data_limite_api_est.strftime("%d/%m/%Y %H:%M:%S")
+                else:
+                    data_filtro_estoques_para_api = ultima_exec_estoques_str_db
+            except ValueError:
+                logger.error(
+                    f"Formato de data inválido para ultima_exec_estoques_str_db: {ultima_exec_estoques_str_db}. "
+                    f"Usando filtro dos últimos {limite_api_dias_est} dias."
+                )
+                data_filtro_estoques_para_api = data_limite_api_est.strftime("%d/%m/%Y %H:%M:%S")
+        else:
+            logger.info(
+                f"Primeira execução para o processo de estoques ou timestamp não encontrado. "
+                f"A busca será limitada aos últimos {limite_api_dias_est} dias devido à restrição da API."
+            )
+            logger.warning(
+                "Para uma carga inicial completa de todos os estoques (incluindo produtos sem movimentação recente), "
+                "uma estratégia de busca individual de estoque por produto seria necessária para a primeira vez."
+            )
+            data_filtro_estoques_para_api = data_limite_api_est.strftime("%d/%m/%Y %H:%M:%S")
 
         estoques_total_listados_api = 0
         pagina_atual_est = 1
         timestamp_inicio_proc_est = datetime.datetime.now(datetime.timezone.utc)
         etapa_estoques_ok = True
 
-        logger.info(f"Iniciando busca de atualizações de estoque alteradas desde: {data_filtro_estoques}.")
+        logger.info(f"Iniciando busca de atualizações de estoque alteradas desde: {data_filtro_estoques_para_api}.")
         while True:
             logger.info(f"Processando página {pagina_atual_est} de atualizações de estoque...")
-            estoques_api_pagina, total_paginas_api_est, pagina_commitada_est = processar_atualizacoes_estoque_v2(db_conn,
-                                                                                         data_alteracao_estoque_inicial=data_filtro_estoques,
-                                                                                         pagina=pagina_atual_est)
+            estoques_api_pagina, total_paginas_api_est, pagina_commitada_est = processar_atualizacoes_estoque_v2(
+                db_conn,
+                data_alteracao_estoque_inicial=data_filtro_estoques_para_api,
+                pagina=pagina_atual_est
+            )
             if estoques_api_pagina is None:
                 logger.error(f"Falha crítica ao buscar atualizações de estoque na API para a página {pagina_atual_est}. Interrompendo estoques.")
                 etapa_estoques_ok = False
@@ -1069,6 +1099,7 @@ if __name__ == "__main__":
         # PASSO 4: Pedidos e Itens de Pedidos
         logger.info("--- INICIANDO PASSO 4: Processamento de Pedidos e Itens ---")
         ultima_exec_pedidos_str = get_ultima_execucao(db_conn, PROCESSO_PEDIDOS)
+        # Usa a nova DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL se não houver último timestamp
         data_filtro_pedidos = ultima_exec_pedidos_str if ultima_exec_pedidos_str else DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL
         
         pedidos_total_listados_api = 0
@@ -1076,12 +1107,14 @@ if __name__ == "__main__":
         timestamp_inicio_proc_ped = datetime.datetime.now(datetime.timezone.utc)
         etapa_pedidos_ok = True
         
-        logger.info(f"Iniciando busca de pedidos alterados desde: {data_filtro_pedidos}.")
+        logger.info(f"Iniciando busca de pedidos alterados desde: {data_filtro_pedidos}.") # Usando a data definida acima
         while True: 
             logger.info(f"Processando página {pagina_atual_ped} de pedidos...")
-            pedidos_api_pagina, total_paginas_api_ped, pagina_commitada_ped = search_pedidos_v2(db_conn, 
-                                                                      data_alteracao_ou_inicial=data_filtro_pedidos, 
-                                                                      pagina=pagina_atual_ped)
+            pedidos_api_pagina, total_paginas_api_ped, pagina_commitada_ped = search_pedidos_v2(
+                db_conn, 
+                data_alteracao_ou_inicial=data_filtro_pedidos, 
+                pagina=pagina_atual_ped
+            )
             if pedidos_api_pagina is None:
                 logger.error(f"Falha crítica ao buscar pedidos na API para a página {pagina_atual_ped}. Interrompendo pedidos.")
                 etapa_pedidos_ok = False
@@ -1111,17 +1144,20 @@ if __name__ == "__main__":
         logger.info("-" * 70)
 
         logger.info("--- Contagem final dos registros no banco de dados ---")
-        with db_conn.cursor() as cur:
-            tabelas_para_contar = ["categorias", "produtos", "produto_categorias", 
-                                   "produto_estoque_total", "produto_estoque_depositos", 
-                                   "pedidos", "pedido_itens", "script_ultima_execucao"]
-            for tabela in tabelas_para_contar:
-                try:
-                    cur.execute(sql.SQL("SELECT COUNT(*) FROM {}").format(sql.Identifier(tabela)))
-                    count = cur.fetchone()[0]
-                    logger.info(f"  - Tabela '{tabela}': {count} registros.")
-                except (Exception, psycopg2.DatabaseError) as e_count:
-                    logger.error(f"  Erro ao contar registros da tabela {tabela}: {e_count}", exc_info=True)
+        if db_conn and not db_conn.closed:
+            with db_conn.cursor() as cur:
+                tabelas_para_contar = ["categorias", "produtos", "produto_categorias", 
+                                    "produto_estoque_total", "produto_estoque_depositos", 
+                                    "pedidos", "pedido_itens", "script_ultima_execucao"]
+                for tabela in tabelas_para_contar:
+                    try:
+                        cur.execute(sql.SQL("SELECT COUNT(*) FROM {}").format(sql.Identifier(tabela)))
+                        count = cur.fetchone()[0]
+                        logger.info(f"  - Tabela '{tabela}': {count} registros.")
+                    except (Exception, psycopg2.DatabaseError) as e_count:
+                        logger.error(f"  Erro ao contar registros da tabela {tabela}: {e_count}", exc_info=True)
+        else:
+            logger.warning("Não foi possível contar os registros, conexão com DB fechada ou indisponível.")
             
     except KeyboardInterrupt:
         logger.warning("Processo interrompido pelo usuário (KeyboardInterrupt).")
@@ -1140,12 +1176,12 @@ if __name__ == "__main__":
             except Exception as e_rollback:
                 logger.error(f"Erro durante o rollback da transação geral: {e_rollback}", exc_info=True)
     finally:
-        if db_conn and not db_conn.closed: # Verifica se db_conn não é None e se não está fechada
+        if db_conn and not (hasattr(db_conn, 'closed') and db_conn.closed):
             db_conn.close()
             logger.info("Conexão com PostgreSQL fechada.")
         elif db_conn is None:
             logger.info("Nenhuma conexão com PostgreSQL para fechar (db_conn is None).")
-        else: # db_conn existe mas está fechada
+        else: 
             logger.info("Conexão com PostgreSQL já estava fechada.")
 
     end_time_total = time.time()
