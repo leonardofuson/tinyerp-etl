@@ -43,22 +43,22 @@ PROCESSO_PRODUTOS = "produtos"
 PROCESSO_ESTOQUES = "estoques"
 PROCESSO_PEDIDOS = "pedidos"
 
-DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL = "01/10/2024 00:00:00" # Usado se não houver timestamp e não for modo lote
+DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL = "01/10/2024 00:00:00"
 DEFAULT_API_TIMEOUT = 60 
-RETRY_DELAY_429 = 30
+RETRY_DELAY_429 = 30 
 
 # --- CONFIGURAÇÃO PARA CARGA DE PEDIDOS EM LOTE ---
 # Altere MODO_LOTE_PEDIDOS para True para carregar um lote específico.
 # Após carregar todos os lotes desejados, volte para False.
-MODO_LOTE_PEDIDOS = False  # Defina como True para carregar o lote abaixo
+MODO_LOTE_PEDIDOS = True  # ATIVADO PARA CARREGAR O LOTE ABAIXO
 # Defina o período do lote (formato dd/mm/aaaa). O script usará data_pedido_inicial e data_pedido_final.
-DATA_LOTE_PEDIDOS_INICIO_STR = "01/10/2024" 
-DATA_LOTE_PEDIDOS_FIM_STR = "31/10/2024"   
+DATA_LOTE_PEDIDOS_INICIO_STR = "01/10/2024" # Início de Outubro
+DATA_LOTE_PEDIDOS_FIM_STR = "31/10/2024"   # Fim de Outubro
 # -------------------------------------------------
 
 # --- Função Auxiliar para Conversão ---
-# (safe_float_convert - como na versão anterior)
 def safe_float_convert(value_str, default=0.0):
+    """Converte uma string para float de forma segura, tratando None, ',', e strings vazias."""
     if value_str is None: return default
     value_str = str(value_str).strip().replace(',', '.')
     if not value_str: return default
@@ -68,8 +68,8 @@ def safe_float_convert(value_str, default=0.0):
         return default
 
 # --- Funções de Banco de Dados (PostgreSQL) ---
-# (get_db_connection, criar_tabelas_db, get_ultima_execucao, set_ultima_execucao - como na versão anterior)
 def get_db_connection():
+    """Estabelece e retorna uma conexão com o banco de dados PostgreSQL."""
     conn = None
     try:
         conn = psycopg2.connect(
@@ -82,6 +82,7 @@ def get_db_connection():
     return conn
 
 def criar_tabelas_db(conn):
+    """Cria as tabelas no banco de dados se elas não existirem."""
     commands = (
         """CREATE TABLE IF NOT EXISTS categorias (id_categoria INTEGER PRIMARY KEY, descricao_categoria TEXT NOT NULL, id_categoria_pai INTEGER, FOREIGN KEY (id_categoria_pai) REFERENCES categorias (id_categoria) ON DELETE SET NULL);""",
         """CREATE TABLE IF NOT EXISTS produtos (id_produto INTEGER PRIMARY KEY, nome_produto TEXT, codigo_produto TEXT UNIQUE, preco_produto REAL, unidade_produto TEXT, situacao_produto TEXT, data_criacao_produto TEXT, gtin_produto TEXT, preco_promocional_produto REAL, preco_custo_produto REAL, preco_custo_medio_produto REAL, tipo_variacao_produto TEXT);""",
@@ -103,6 +104,7 @@ def criar_tabelas_db(conn):
         raise
 
 def get_ultima_execucao(conn, nome_processo):
+    """Obtém o timestamp da última execução bem-sucedida de um processo."""
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT timestamp_ultima_execucao FROM script_ultima_execucao WHERE nome_processo = %s", (nome_processo,))
@@ -112,6 +114,7 @@ def get_ultima_execucao(conn, nome_processo):
     return None
 
 def set_ultima_execucao(conn, nome_processo, timestamp=None):
+    """Define o timestamp da última execução de um processo."""
     ts = timestamp or datetime.datetime.now(datetime.timezone.utc)
     try:
         with conn.cursor() as cur:
@@ -119,18 +122,14 @@ def set_ultima_execucao(conn, nome_processo, timestamp=None):
                            ON CONFLICT (nome_processo) DO UPDATE SET timestamp_ultima_execucao = EXCLUDED.timestamp_ultima_execucao;""",
                         (nome_processo, ts))
         if conn and not conn.closed: conn.commit()
-        # Para timestamp objeto datetime, formata. Senão, assume que já é string formatada (ex: data_lote_fim)
         ts_log = ts.strftime('%d/%m/%Y %H:%M:%S %Z') if isinstance(ts, datetime.datetime) else ts
         logger.info(f"Timestamp para '{nome_processo}' definido: {ts_log}.")
     except Exception as e:
         logger.error(f"Erro ao definir última execução para '{nome_processo}': {e}", exc_info=True)
         if conn and not conn.closed: conn.rollback()
 
-# --- Funções de Salvamento no Banco de Dados ---
-# (salvar_categoria_db, salvar_produto_db, salvar_produto_categorias_db, 
-#  salvar_produto_estoque_total_db, salvar_estoque_por_deposito_db,
-#  salvar_pedido_db, salvar_pedido_itens_db - como na versão anterior)
 def salvar_categoria_db(conn, categoria_dict, id_pai=None):
+    """Salva uma categoria e suas subcategorias recursivamente."""
     cat_id_str = categoria_dict.get("id") 
     cat_descricao = categoria_dict.get("descricao")
     if cat_id_str and cat_descricao: 
@@ -148,6 +147,7 @@ def salvar_categoria_db(conn, categoria_dict, id_pai=None):
         except Exception as e: logger.error(f"Erro PostgreSQL ao salvar categoria ID '{cat_id_str}': {e}", exc_info=True)
 
 def salvar_produto_db(conn, produto_api_data):
+    """Salva os dados cadastrais de um produto no banco."""
     id_produto_str = str(produto_api_data.get("id","")).strip()
     if not id_produto_str or not id_produto_str.isdigit():
         logger.error(f"ID do produto inválido: '{id_produto_str}'. Dados: {produto_api_data}")
@@ -186,6 +186,7 @@ def salvar_produto_db(conn, produto_api_data):
     except Exception as e: logger.error(f"Erro ao salvar produto ID '{id_produto_str}': {e}", exc_info=True); raise
 
 def salvar_produto_categorias_db(conn, id_produto, categorias_lista_api):
+    """Salva o relacionamento produto-categorias usando execute_values."""
     if not isinstance(id_produto, int): raise ValueError(f"ID do produto inválido: {id_produto}")
     try:
         with conn.cursor() as cur:
@@ -204,6 +205,7 @@ def salvar_produto_categorias_db(conn, id_produto, categorias_lista_api):
     except Exception as e: logger.error(f"Erro ao salvar categorias do produto ID {id_produto}: {e}", exc_info=True); raise
 
 def salvar_produto_estoque_total_db(conn, id_produto, nome_produto, saldo_total_api, saldo_reservado_api, data_ultima_atualizacao_estoque=None):
+    """Salva o estoque total de um produto."""
     id_p = int(id_produto)
     try:
         st = safe_float_convert(saldo_total_api); sr = safe_float_convert(saldo_reservado_api)
@@ -225,6 +227,7 @@ def salvar_produto_estoque_total_db(conn, id_produto, nome_produto, saldo_total_
     except Exception as e: logger.error(f"Erro ao salvar estoque total para Produto ID {id_produto}: {e}", exc_info=True); raise
 
 def salvar_estoque_por_deposito_db(conn, id_produto, nome_produto, lista_depositos_api):
+    """Salva o estoque por depósito de um produto."""
     id_p = int(id_produto)
     try:
         with conn.cursor() as cur:
@@ -243,6 +246,7 @@ def salvar_estoque_por_deposito_db(conn, id_produto, nome_produto, lista_deposit
     except Exception as e: logger.error(f"Erro ao salvar estoque por depósito para Produto ID {id_produto}: {e}", exc_info=True); raise
 
 def salvar_pedido_db(conn, pedido_api_data):
+    """Salva os dados de um pedido no banco."""
     id_ped_str = str(pedido_api_data.get("id","")).strip()
     if not id_ped_str or not id_ped_str.isdigit(): raise ValueError(f"ID do pedido inválido: {id_ped_str}")
     id_ped = int(id_ped_str)
@@ -265,6 +269,7 @@ def salvar_pedido_db(conn, pedido_api_data):
     except Exception as e: logger.error(f"Erro ao salvar pedido ID '{id_ped_str}': {e}", exc_info=True); raise
 
 def salvar_pedido_itens_db(conn, id_pedido_api, itens_lista_api):
+    """Salva os itens de um pedido no banco usando execute_values."""
     id_ped_int = int(id_pedido_api)
     try:
         with conn.cursor() as cur:
@@ -335,7 +340,7 @@ def make_api_v2_request(endpoint_path, method="GET", payload_dict=None,
                 return None, False 
             status_api = retorno_geral.get("status")
             status_processamento = str(retorno_geral.get("status_processamento", ""))
-            if status_api != "OK": # Erro reportado pela lógica de negócio da API Tiny
+            if status_api != "OK":
                 erros_api = retorno_geral.get("erros", []) 
                 codigo_erro, msg_erro = "", ""
                 if erros_api and isinstance(erros_api[0], dict):
@@ -343,13 +348,9 @@ def make_api_v2_request(endpoint_path, method="GET", payload_dict=None,
                     codigo_erro = err_obj.get("codigo", "") if isinstance(err_obj, dict) else ""
                     msg_erro = err_obj.get("erro", str(err_obj)) if isinstance(err_obj, dict) else str(err_obj)
                 elif erros_api and isinstance(erros_api[0], str): msg_erro = erros_api[0]
-                
                 logger.error(f"API Tiny: Status '{status_api}' (Endpoint: {endpoint_path}). Código: {codigo_erro}. Msg: {msg_erro}. Resp: {str(retorno_geral)[:500]}")
                 if codigo_erro == "2": logger.critical("Token da API Tiny inválido ou expirado.")
-                # Decidir se este tipo de erro da API (ex: código 35) deve ser retentado pelo loop principal
-                # Por ora, erros lógicos da API retornam False e não são retentados aqui.
                 return None, False
-            
             if status_processamento not in ["3", "10"]: 
                 msg_proc_err = ""
                 errs_ret = retorno_geral.get("erros", [])
@@ -389,6 +390,7 @@ def make_api_v2_request(endpoint_path, method="GET", payload_dict=None,
             return None, False
     return None, False
 
+# --- Funções de Lógica de Negócio (Busca e Salvamento) ---
 def get_categorias_v2(conn):
     """Busca todas as categorias da API e as salva no banco."""
     logger.info("Iniciando busca e salvamento de Categorias.")
@@ -528,7 +530,7 @@ def search_pedidos_v2(conn, data_filtro_inicial=None, data_filtro_final=None, pa
     elif data_filtro_inicial: # Modo Incremental por data de alteração
         params_api["dataAlteracaoInicial"] = data_filtro_inicial
         log_msg_data = f"por DATA DE ALTERAÇÃO desde {data_filtro_inicial}"
-    else: # Sem filtro de data (pouco provável de ser usado, mas para segurança)
+    else: 
         log_msg_data = "sem filtro de data específico (buscando todos)"
 
     logger.info(f"Buscando pág {pagina} de pedidos {log_msg_data}.")
@@ -541,7 +543,7 @@ def search_pedidos_v2(conn, data_filtro_inicial=None, data_filtro_final=None, pa
         num_pags_tot = int(ret_api.get('numero_paginas',0))
     elif not suc_api: 
         logger.error(f"Falha ao buscar pedidos (API) pág {pagina} {log_msg_data}.")
-        return None, 0, False # Falha crítica na API
+        return None, 0, False 
 
     if peds_pag_api and isinstance(peds_pag_api, list):
         todos_ok, salvos_pag = True, 0
@@ -623,21 +625,26 @@ if __name__ == "__main__":
         data_filtro_est_api = None
         hoje_utc = datetime.datetime.now(datetime.timezone.utc)
         dias_lim_est = 29 
-        data_lim_est_api = hoje_utc - datetime.timedelta(days=dias_lim_est)
+        data_lim_est_api_dt = hoje_utc - datetime.timedelta(days=dias_lim_est) # Objeto datetime
+
         if ultima_exec_est_str:
             try:
                 ult_exec_obj_naive = datetime.datetime.strptime(ultima_exec_est_str, "%d/%m/%Y %H:%M:%S")
                 ult_exec_obj_utc = ult_exec_obj_naive.replace(tzinfo=datetime.timezone.utc)
-                if ult_exec_obj_utc < data_lim_est_api:
-                    logger.warning(f"Última sync de estoque ({ultima_exec_est_str}) > {dias_lim_est} dias. Ajustando filtro para últimos {dias_lim_est} dias ({data_lim_est_api.strftime('%d/%m/%Y %H:%M:%S %Z')}).")
-                    data_filtro_est_api = data_lim_est_api.strftime("%d/%m/%Y %H:%M:%S")
-                else: data_filtro_est_api = ultima_exec_est_str
+                
+                if ult_exec_obj_utc < data_lim_est_api_dt:
+                    logger.warning(f"Última sync de estoque ({ultima_exec_est_str}) > {dias_lim_est} dias. Ajustando filtro para últimos {dias_lim_est} dias ({data_lim_est_api_dt.strftime('%d/%m/%Y %H:%M:%S %Z')}).")
+                    data_filtro_est_api = data_lim_est_api_dt.strftime("%d/%m/%Y %H:%M:%S")
+                else: 
+                    data_filtro_est_api = ultima_exec_est_str
             except ValueError:
-                logger.error(f"Data inválida para ultima_exec_estoques: {ultima_exec_est_str}. Usando filtro de {dias_lim_est} dias."); data_filtro_est_api = data_lim_est_api.strftime("%d/%m/%Y %H:%M:%S")
+                logger.error(f"Data inválida para ultima_exec_estoques: {ultima_exec_est_str}. Usando filtro de {dias_lim_est} dias."); 
+                data_filtro_est_api = data_lim_est_api_dt.strftime("%d/%m/%Y %H:%M:%S")
         else:
-            logger.info(f"Primeira execução de estoques. Busca limitada aos últimos {dias_lim_est} dias ({data_lim_est_api.strftime('%d/%m/%Y %H:%M:%S %Z')}).")
+            logger.info(f"Primeira execução de estoques. Busca limitada aos últimos {dias_lim_est} dias ({data_lim_est_api_dt.strftime('%d/%m/%Y %H:%M:%S %Z')}).")
             logger.warning("Para carga inicial completa de todos os estoques, uma estratégia de busca individual seria necessária na primeira vez.")
-            data_filtro_est_api = data_lim_est_api.strftime("%d/%m/%Y %H:%M:%S")
+            data_filtro_est_api = data_lim_est_api_dt.strftime("%d/%m/%Y %H:%M:%S")
+        
         total_est_listados, pag_est, ts_inicio_est, etapa_est_ok = 0, 1, datetime.datetime.now(datetime.timezone.utc), True
         logger.info(f"Iniciando busca de atualizações de estoque desde: {data_filtro_est_api}.")
         while True:
@@ -649,43 +656,49 @@ if __name__ == "__main__":
             if total_pags_est == 0 or pag_est >= total_pags_est: logger.info("Todas as págs de estoques processadas."); break
             pag_est += 1
             if pag_est <= total_pags_est: logger.info("Pausa (1s) antes da próxima pág de estoques..."); time.sleep(1)
-        if etapa_est_ok: set_ultima_execucao(db_conn, PROCESSO_ESTOQUES, ts_inicio_est); logger.info(f"Passo 3 (Estoques) concluído. {total_est_listados} atualizações listadas. Timestamp atualizado.")
-        else: logger.warning("Passo 3 (Estoques) com erros. Timestamp NÃO atualizado.")
+        
+        if etapa_est_ok: 
+            set_ultima_execucao(db_conn, PROCESSO_ESTOQUES, ts_inicio_est)
+            logger.info(f"Passo 3 (Estoques) concluído. {total_est_listados} atualizações listadas. Timestamp atualizado.")
+        else: 
+            logger.warning("Passo 3 (Estoques) com erros. Timestamp NÃO atualizado.")
         logger.info("-" * 70)
 
         # PASSO 4: Pedidos e Itens de Pedidos
         logger.info("--- INICIANDO PASSO 4: Pedidos e Itens ---")
         ts_inicio_ped = datetime.datetime.now(datetime.timezone.utc)
         etapa_peds_ok = True
-        data_filtro_ped_inicial_para_api = None
-        data_filtro_ped_final_para_api = None
+        filtro_ped_data_inicial_api = None
+        filtro_ped_data_final_api = None # Para o modo lote
+        timestamp_final_lote_pedidos = ts_inicio_ped # Default para o timestamp de início da etapa
 
         if MODO_LOTE_PEDIDOS:
             logger.info(f"MODO DE LOTE ATIVADO PARA PEDIDOS: De {DATA_LOTE_PEDIDOS_INICIO_STR} a {DATA_LOTE_PEDIDOS_FIM_STR}")
-            data_filtro_ped_inicial_para_api = DATA_LOTE_PEDIDOS_INICIO_STR
-            data_filtro_ped_final_para_api = DATA_LOTE_PEDIDOS_FIM_STR
-            # Convertendo DATA_LOTE_PEDIDOS_FIM_STR para datetime para usar no set_ultima_execucao
+            filtro_ped_data_inicial_api = DATA_LOTE_PEDIDOS_INICIO_STR
+            filtro_ped_data_final_api = DATA_LOTE_PEDIDOS_FIM_STR
             try:
-                # Adiciona hora final para o timestamp da última execução do lote
-                timestamp_final_lote = datetime.datetime.strptime(DATA_LOTE_PEDIDOS_FIM_STR + " 23:59:59", "%d/%m/%Y %H:%M:%S")
-                timestamp_final_lote = timestamp_final_lote.replace(tzinfo=datetime.timezone.utc)
+                # Define o timestamp a ser salvo como o final do dia do período do lote
+                dt_obj_fim_lote = datetime.datetime.strptime(DATA_LOTE_PEDIDOS_FIM_STR, "%d/%m/%Y")
+                timestamp_final_lote_pedidos = dt_obj_fim_lote.replace(hour=23, minute=59, second=59, tzinfo=datetime.timezone.utc)
             except ValueError:
-                logger.error(f"Formato de DATA_LOTE_PEDIDOS_FIM_STR ('{DATA_LOTE_PEDIDOS_FIM_STR}') inválido. Use dd/mm/aaaa.")
-                timestamp_final_lote = ts_inicio_ped # Fallback para o início da etapa atual
-        else:
+                logger.error(f"Formato de DATA_LOTE_PEDIDOS_FIM_STR ('{DATA_LOTE_PEDIDOS_FIM_STR}') inválido. Use dd/mm/aaaa. O timestamp da última execução pode não ser o ideal.")
+                # Mantém timestamp_final_lote_pedidos como ts_inicio_ped
+        else: # Modo incremental normal
             ultima_exec_ped_str = get_ultima_execucao(db_conn, PROCESSO_PEDIDOS)
-            data_filtro_ped_inicial_para_api = ultima_exec_ped_str if ultima_exec_ped_str else DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL
-            # data_filtro_ped_final_para_api permanece None para usar dataAlteracaoInicial
+            filtro_ped_data_inicial_api = ultima_exec_ped_str if ultima_exec_ped_str else DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL
+            # filtro_ped_data_final_api permanece None, pois usaremos dataAlteracaoInicial
         
         total_peds_listados, pag_ped = 0, 1
-        logger.info(f"Iniciando busca de pedidos (Filtro Inicial: {data_filtro_ped_inicial_para_api}" + 
-                    (f", Filtro Final: {data_filtro_ped_final_para_api}" if data_filtro_ped_final_para_api else "") + ").")
+        log_msg_filtro_ped = f"Filtro Inicial: {filtro_ped_data_inicial_api}"
+        if filtro_ped_data_final_api: log_msg_filtro_ped += f", Filtro Final: {filtro_ped_data_final_api}"
+        logger.info(f"Iniciando busca de pedidos ({log_msg_filtro_ped}).")
+        
         while True: 
             logger.info(f"Processando pág {pag_ped} de pedidos...")
             peds_pag, total_pags_ped, pag_commit_ped = search_pedidos_v2(
-                db_conn,
-                data_filtro_inicial=data_filtro_ped_inicial_para_api,
-                data_filtro_final=data_filtro_ped_final_para_api, # Passa para a função
+                db_conn, 
+                data_filtro_inicial=filtro_ped_data_inicial_api, 
+                data_filtro_final=filtro_ped_data_final_api, # Passado para search_pedidos_v2
                 pagina=pag_ped
             )
             if peds_pag is None: 
@@ -701,13 +714,10 @@ if __name__ == "__main__":
                 logger.info("Pausa (1s) antes da próxima pág de pedidos..."); time.sleep(1) 
         
         if etapa_peds_ok: 
-            if MODO_LOTE_PEDIDOS:
-                # Para modo lote, o timestamp salvo é o final do período do lote, para que o próximo incremental comece corretamente
-                set_ultima_execucao(db_conn, PROCESSO_PEDIDOS, timestamp_final_lote) 
-                logger.info(f"Lote de Pedidos (até {DATA_LOTE_PEDIDOS_FIM_STR}) concluído. {total_peds_listados} pedidos listados. Timestamp atualizado para fim do lote.")
-            else: # Modo incremental normal
-                set_ultima_execucao(db_conn, PROCESSO_PEDIDOS, ts_inicio_ped)
-                logger.info(f"Passo 4 (Pedidos) incremental concluído. {total_peds_listados} pedidos listados. Timestamp atualizado.")
+            ts_para_salvar = timestamp_final_lote_pedidos if MODO_LOTE_PEDIDOS else ts_inicio_ped
+            set_ultima_execucao(db_conn, PROCESSO_PEDIDOS, ts_para_salvar)
+            msg_conclusao_pedidos = f"Lote de Pedidos (até {DATA_LOTE_PEDIDOS_FIM_STR})" if MODO_LOTE_PEDIDOS else "Passo 4 (Pedidos) incremental"
+            logger.info(f"{msg_conclusao_pedidos} concluído. {total_peds_listados} pedidos listados. Timestamp atualizado.")
         else: 
             logger.warning("Passo 4 (Pedidos) com erros. Timestamp NÃO atualizado.")
         logger.info("-" * 70)
