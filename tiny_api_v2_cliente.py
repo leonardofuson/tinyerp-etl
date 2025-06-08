@@ -49,8 +49,8 @@ RETRY_DELAY_429 = 30
 
 # --- CONFIGURAÇÃO PARA CARGA DE PEDIDOS EM LOTE ---
 MODO_LOTE_PEDIDOS = True 
-DATA_LOTE_PEDIDOS_INICIO_STR = "01/04/2025" 
-DATA_LOTE_PEDIDOS_FIM_STR = "30/04/2025"   
+DATA_LOTE_PEDIDOS_INICIO_STR = "01/05/2025" 
+DATA_LOTE_PEDIDOS_FIM_STR = "31/05/2025"   
 # -------------------------------------------------
 
 def safe_float_convert(value_str, default=0.0):
