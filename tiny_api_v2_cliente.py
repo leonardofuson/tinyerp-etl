@@ -48,12 +48,16 @@ DEFAULT_API_TIMEOUT = 60
 RETRY_DELAY_429 = 30 
 
 # --- CONFIGURAÇÃO PARA CARGA DE PEDIDOS EM LOTE ---
-MODO_LOTE_PEDIDOS = True 
-DATA_LOTE_PEDIDOS_INICIO_STR = "01/05/2025" 
-DATA_LOTE_PEDIDOS_FIM_STR = "31/05/2025"   
+# MODO DE LOTE DESATIVADO PARA OPERAÇÃO NORMAL/PRODUÇÃO
+MODO_LOTE_PEDIDOS = False
+# As variáveis abaixo são ignoradas quando MODO_LOTE_PEDIDOS é False
+DATA_LOTE_PEDIDOS_INICIO_STR = "01/10/2024" 
+DATA_LOTE_PEDIDOS_FIM_STR = "31/10/2024"   
 # -------------------------------------------------
 
+# --- Função Auxiliar para Conversão ---
 def safe_float_convert(value_str, default=0.0):
+    """Converte uma string para float de forma segura, tratando None, ',', e strings vazias."""
     if value_str is None: return default
     value_str = str(value_str).strip().replace(',', '.')
     if not value_str: return default
@@ -62,7 +66,9 @@ def safe_float_convert(value_str, default=0.0):
         logger.debug(f"Não foi possível converter '{value_str}' para float, usando {default}.")
         return default
 
+# --- Funções de Banco de Dados (PostgreSQL) ---
 def get_db_connection(max_retries=3, retry_delay=10):
+    """Estabelece e retorna uma conexão com o banco de dados PostgreSQL, com retries."""
     conn = None; attempt = 0
     while attempt < max_retries:
         try:
@@ -80,6 +86,7 @@ def get_db_connection(max_retries=3, retry_delay=10):
     return None
 
 def criar_tabelas_db(conn):
+    """Cria as tabelas no banco de dados se elas não existirem."""
     commands = (
         """CREATE TABLE IF NOT EXISTS categorias (id_categoria INTEGER PRIMARY KEY, descricao_categoria TEXT NOT NULL, id_categoria_pai INTEGER, FOREIGN KEY (id_categoria_pai) REFERENCES categorias (id_categoria) ON DELETE SET NULL);""",
         """CREATE TABLE IF NOT EXISTS produtos (id_produto INTEGER PRIMARY KEY, nome_produto TEXT, codigo_produto TEXT UNIQUE, preco_produto REAL, unidade_produto TEXT, situacao_produto TEXT, data_criacao_produto TEXT, gtin_produto TEXT, preco_promocional_produto REAL, preco_custo_produto REAL, preco_custo_medio_produto REAL, tipo_variacao_produto TEXT);""",
@@ -101,6 +108,7 @@ def criar_tabelas_db(conn):
         raise
 
 def get_ultima_execucao(conn, nome_processo):
+    """Obtém o timestamp da última execução bem-sucedida de um processo."""
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT timestamp_ultima_execucao FROM script_ultima_execucao WHERE nome_processo = %s", (nome_processo,))
@@ -110,6 +118,7 @@ def get_ultima_execucao(conn, nome_processo):
     return None
 
 def set_ultima_execucao(conn, nome_processo, timestamp=None):
+    """Define o timestamp da última execução de um processo."""
     ts = timestamp or datetime.datetime.now(datetime.timezone.utc)
     try:
         with conn.cursor() as cur:
@@ -123,6 +132,7 @@ def set_ultima_execucao(conn, nome_processo, timestamp=None):
         if conn and not conn.closed: conn.rollback()
 
 def salvar_categoria_db(conn, categoria_dict, id_pai=None):
+    """Salva uma categoria e suas subcategorias recursivamente."""
     cat_id_str = categoria_dict.get("id"); cat_desc = categoria_dict.get("descricao")
     if cat_id_str and cat_desc: 
         try:
@@ -131,25 +141,16 @@ def salvar_categoria_db(conn, categoria_dict, id_pai=None):
                 cur.execute("INSERT INTO categorias (id_categoria, descricao_categoria, id_categoria_pai) VALUES (%s, %s, %s) ON CONFLICT (id_categoria) DO UPDATE SET descricao_categoria = EXCLUDED.descricao_categoria, id_categoria_pai = EXCLUDED.id_categoria_pai;", (cat_id, cat_desc, id_pai))
             if "nodes" in categoria_dict and isinstance(categoria_dict["nodes"], list):
                 for sub_cat in categoria_dict["nodes"]: salvar_categoria_db(conn, sub_cat, id_pai=cat_id) 
-        except ValueError: logger.warning(f"ID cat. inválido '{cat_id_str}'. Cat: {categoria_dict}", exc_info=False)
-        except Exception as e: logger.error(f"Erro PG ao salvar cat. ID '{cat_id_str}': {e}", exc_info=True)
+        except ValueError: logger.warning(f"ID da categoria inválido '{cat_id_str}'. Categoria: {categoria_dict}", exc_info=False)
+        except Exception as e: logger.error(f"Erro PostgreSQL ao salvar categoria ID '{cat_id_str}': {e}", exc_info=True)
 
 def salvar_produto_db(conn, produto_api_data):
+    """Salva os dados cadastrais de um produto no banco."""
     id_prod_str = str(produto_api_data.get("id","")).strip()
-    if not id_prod_str or not id_prod_str.isdigit(): raise ValueError(f"ID produto inválido: {id_prod_str}")
+    if not id_prod_str or not id_prod_str.isdigit(): raise ValueError(f"ID do produto inválido: {id_prod_str}")
     id_prod = int(id_prod_str)
     try:
-        dados = {
-            "id_produto": id_prod, "nome_produto": produto_api_data.get("nome"),
-            "codigo_produto": str(p_api_cod).strip() if (p_api_cod := produto_api_data.get("codigo")) and str(p_api_cod).strip() else None,
-            "preco_produto": safe_float_convert(produto_api_data.get("preco")),
-            "unidade_produto": produto_api_data.get("unidade"), "situacao_produto": produto_api_data.get("situacao"),
-            "data_criacao_produto": produto_api_data.get("data_criacao"), "gtin_produto": produto_api_data.get("gtin"),
-            "preco_promocional_produto": safe_float_convert(produto_api_data.get("preco_promocional")),
-            "preco_custo_produto": safe_float_convert(produto_api_data.get("preco_custo")),
-            "preco_custo_medio_produto": safe_float_convert(produto_api_data.get("preco_custo_medio")),
-            "tipo_variacao_produto": produto_api_data.get("tipoVariacao")
-        }
+        dados = { "id_produto": id_prod, "nome_produto": produto_api_data.get("nome"), "codigo_produto": str(p_api_cod).strip() if (p_api_cod := produto_api_data.get("codigo")) and str(p_api_cod).strip() else None, "preco_produto": safe_float_convert(produto_api_data.get("preco")), "unidade_produto": produto_api_data.get("unidade"), "situacao_produto": produto_api_data.get("situacao"), "data_criacao_produto": produto_api_data.get("data_criacao"), "gtin_produto": produto_api_data.get("gtin"), "preco_promocional_produto": safe_float_convert(produto_api_data.get("preco_promocional")), "preco_custo_produto": safe_float_convert(produto_api_data.get("preco_custo")), "preco_custo_medio_produto": safe_float_convert(produto_api_data.get("preco_custo_medio")), "tipo_variacao_produto": produto_api_data.get("tipoVariacao") }
         with conn.cursor() as cur:
             if dados["codigo_produto"] is not None:
                 cur.execute("SELECT id_produto FROM produtos WHERE codigo_produto = %s AND id_produto != %s", (dados["codigo_produto"], id_prod))
@@ -162,7 +163,8 @@ def salvar_produto_db(conn, produto_api_data):
     except Exception as e: logger.error(f"Erro ao salvar produto ID '{id_prod_str}': {e}", exc_info=True); raise
 
 def salvar_produto_categorias_db(conn, id_produto, categorias_lista_api):
-    if not isinstance(id_produto, int): raise ValueError(f"ID produto inválido: {id_produto}")
+    """Salva o relacionamento produto-categorias usando execute_values."""
+    if not isinstance(id_produto, int): raise ValueError(f"ID do produto inválido: {id_produto}")
     try:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM produto_categorias WHERE id_produto = %s", (id_produto,))
@@ -172,16 +174,17 @@ def salvar_produto_categorias_db(conn, id_produto, categorias_lista_api):
     except Exception as e: logger.error(f"Erro ao salvar categorias do produto ID {id_produto}: {e}", exc_info=True); raise
 
 def salvar_produto_estoque_total_db(conn, id_produto, nome_produto, saldo_total_api, saldo_reservado_api, data_ultima_atualizacao_estoque=None):
+    """Salva o estoque total de um produto."""
     id_p = int(id_produto)
     try:
         st = safe_float_convert(saldo_total_api); sr = safe_float_convert(saldo_reservado_api); dt_att = None
         if data_ultima_atualizacao_estoque is None: dt_att = datetime.datetime.now(datetime.timezone.utc)
         elif isinstance(data_ultima_atualizacao_estoque, str):
             try: dt_att = datetime.datetime.strptime(data_ultima_atualizacao_estoque, "%d/%m/%Y %H:%M:%S").replace(tzinfo=datetime.timezone.utc)
-            except ValueError: dt_att = datetime.datetime.now(datetime.timezone.utc); logger.warning(f"Data estoque inválida '{data_ultima_atualizacao_estoque}', usando atual.")
+            except ValueError: dt_att = datetime.datetime.now(datetime.timezone.utc); logger.warning(f"Data de estoque inválida '{data_ultima_atualizacao_estoque}', usando atual.")
         elif isinstance(data_ultima_atualizacao_estoque, datetime.datetime):
             dt_att = data_ultima_atualizacao_estoque if data_ultima_atualizacao_estoque.tzinfo else data_ultima_atualizacao_estoque.replace(tzinfo=datetime.timezone.utc)
-        else: dt_att = datetime.datetime.now(datetime.timezone.utc); logger.warning(f"Tipo data estoque inesperado, usando atual.")
+        else: dt_att = datetime.datetime.now(datetime.timezone.utc); logger.warning(f"Tipo de data de estoque inesperado, usando atual.")
         with conn.cursor() as cur:
             cur.execute("""INSERT INTO produto_estoque_total (id_produto, nome_produto_estoque, saldo_total_api, saldo_reservado_api, data_ultima_atualizacao_api)
                            VALUES (%s,%s,%s,%s,%s) ON CONFLICT (id_produto) DO UPDATE SET nome_produto_estoque=EXCLUDED.nome_produto_estoque,
@@ -191,6 +194,7 @@ def salvar_produto_estoque_total_db(conn, id_produto, nome_produto, saldo_total_
     except Exception as e: logger.error(f"Erro ao salvar estoque total para Produto ID {id_produto}: {e}", exc_info=True); raise
 
 def salvar_estoque_por_deposito_db(conn, id_produto, nome_produto, lista_depositos_api):
+    """Salva o estoque por depósito de um produto."""
     id_p = int(id_produto)
     try:
         with conn.cursor() as cur:
@@ -208,6 +212,7 @@ def salvar_estoque_por_deposito_db(conn, id_produto, nome_produto, lista_deposit
     except Exception as e: logger.error(f"Erro ao salvar estoque por depósito para Produto ID {id_produto}: {e}", exc_info=True); raise
 
 def salvar_pedido_db(conn, pedido_api_data):
+    """Salva os dados de um pedido no banco."""
     id_ped_str = str(pedido_api_data.get("id","")).strip()
     if not id_ped_str or not id_ped_str.isdigit(): raise ValueError(f"ID do pedido inválido: {id_ped_str}")
     id_ped = int(id_ped_str)
@@ -230,6 +235,7 @@ def salvar_pedido_db(conn, pedido_api_data):
     except Exception as e: logger.error(f"Erro ao salvar pedido ID '{id_ped_str}': {e}", exc_info=True); raise
 
 def salvar_pedido_itens_db(conn, id_pedido_api, itens_lista_api):
+    """Salva os itens de um pedido no banco usando execute_values."""
     id_ped_int = int(id_pedido_api)
     try:
         with conn.cursor() as cur:
@@ -252,6 +258,7 @@ def salvar_pedido_itens_db(conn, id_pedido_api, itens_lista_api):
 
 def make_api_v2_request(endpoint_path, method="GET", payload_dict=None, 
                         max_retries=3, initial_retry_delay=2, timeout_seconds=DEFAULT_API_TIMEOUT):
+    """Realiza uma requisição para a API v2 do Tiny ERP."""
     full_url = f"{BASE_URL_V2}{endpoint_path}"
     base_params = {"token": API_V2_TOKEN, "formato": "json"}
     all_params = base_params.copy(); 
@@ -263,21 +270,28 @@ def make_api_v2_request(endpoint_path, method="GET", payload_dict=None,
         try:
             if retries > 0: logger.info(f"Aguardando {delay}s antes da tentativa {retries + 1}/{max_retries + 1} para {endpoint_path}..."); time.sleep(delay)
             if retries > 0 and delay < RETRY_DELAY_429: delay = min(delay * 2, 30)
+            
             logger.debug(f"Tentativa {retries + 1} - {method} {full_url} - Params: {params_log}")
             if method.upper() == "GET": resp = requests.get(full_url, params=all_params, timeout=timeout_seconds)
             elif method.upper() == "POST": resp = requests.post(full_url, data=all_params, timeout=timeout_seconds)
             else: logger.error(f"Método {method} não suportado."); return None, False 
+            
             logger.debug(f"Resposta de {endpoint_path}: Status {resp.status_code}, Conteúdo (parcial): {resp.text[:200]}")
             resp.raise_for_status()
+            
             try: data = resp.json()
             except json.JSONDecodeError as e: logger.error(f"Erro JSON de {endpoint_path}: {e}", exc_info=True); logger.debug(f"Resposta não JSON: {resp.text[:500]}"); return None, False
+            
             retorno = data.get("retorno")
             if not retorno: logger.error(f"Chave 'retorno' ausente em {endpoint_path}. Resposta: {str(data)[:500]}"); return None, False 
+            
             if endpoint_path == ENDPOINT_CATEGORIAS:
                 if isinstance(retorno, list): return retorno, True
                 if isinstance(retorno, dict) and retorno.get("status") == "OK" and isinstance(retorno.get("categorias"), list): return retorno["categorias"], True
                 logger.error(f"API Tiny (Categorias) Erro: Status '{retorno.get('status')}', Erros: {retorno.get('erros', [])}"); return None, False
+
             if not isinstance(retorno, dict): logger.error(f"'retorno' não é dict em {endpoint_path}. Conteúdo: {str(retorno)[:300]}"); return None, False
+            
             status_api, status_proc = retorno.get("status"), str(retorno.get("status_processamento", ""))
             if status_api != "OK":
                 errs, cod_err, msg_err = retorno.get("erros", []), "", ""
@@ -287,6 +301,7 @@ def make_api_v2_request(endpoint_path, method="GET", payload_dict=None,
                 logger.error(f"API Tiny: Status '{status_api}' (Endpoint: {endpoint_path}). Código: {cod_err}. Msg: {msg_err}. Resp: {str(retorno)[:500]}")
                 if cod_err == "2": logger.critical("Token API inválido/expirado.")
                 return None, False
+            
             if status_proc not in ["3", "10"]:
                 msg_proc_err = ""
                 errs_ret = retorno.get("erros", [])
@@ -304,7 +319,7 @@ def make_api_v2_request(endpoint_path, method="GET", payload_dict=None,
                 if resp.status_code == 429: logger.warning(f"Limite taxa (429). Próxima tentativa com delay {RETRY_DELAY_429}s."); delay = RETRY_DELAY_429
                 elif 400 <= resp.status_code < 500: return None, False 
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.ChunkedEncodingError) as e_net:
-            logger.warning(f"Erro Rede/Timeout (Tentativa {retries + 1}) em {endpoint_path}: {type(e_net).__name__} - {e_net}", exc_info=False)
+            logger.warning(f"Erro de Rede/Timeout (Tentativa {retries + 1}) em {endpoint_path}: {type(e_net).__name__} - {e_net}", exc_info=False)
         except requests.exceptions.RequestException as e_req: 
             logger.warning(f"Erro Requisição (Tentativa {retries + 1}) em {endpoint_path}: {type(e_req).__name__} - {e_req}", exc_info=False)
         except Exception as e_geral: 
@@ -316,6 +331,7 @@ def make_api_v2_request(endpoint_path, method="GET", payload_dict=None,
     return None, False
 
 def get_categorias_v2(conn):
+    """Busca todas as categorias da API e as salva no banco."""
     logger.info("Iniciando Categorias.")
     lista_cats, suc = make_api_v2_request(ENDPOINT_CATEGORIAS)
     if suc and isinstance(lista_cats, list):
@@ -338,6 +354,7 @@ def get_categorias_v2(conn):
     return False
 
 def get_produto_detalhes_v2(id_produto_tiny):
+    """Busca os detalhes de um produto específico, incluindo suas categorias."""
     logger.debug(f"Buscando detalhes produto ID {id_produto_tiny}...")
     ret, suc = make_api_v2_request(ENDPOINT_PRODUTO_OBTER, payload_dict={"id": id_produto_tiny})
     if suc and ret and isinstance(ret.get("produto"), dict): return ret["produto"]
@@ -345,6 +362,7 @@ def get_produto_detalhes_v2(id_produto_tiny):
     return None
 
 def search_produtos_v2(conn, data_alteracao_inicial=None, pagina=1):
+    """Busca produtos (cadastrais e categorias) e os salva. Retorna (lista_api, num_pags, sucesso_db_pag)."""
     logger.info(f"Buscando pág {pagina} de produtos desde {data_alteracao_inicial or 'inicio'}.")
     params = {"pagina": pagina}; 
     if data_alteracao_inicial: params["dataAlteracaoInicial"] = data_alteracao_inicial
@@ -376,10 +394,11 @@ def search_produtos_v2(conn, data_alteracao_inicial=None, pagina=1):
     return [], num_pags_tot, True
 
 def processar_atualizacoes_estoque_v2(conn, data_alteracao_estoque_inicial=None, pagina=1):
+    """Busca atualizações de estoque e salva. Retorna (lista_api, num_pags, sucesso_db_pag)."""
     logger.info(f"Buscando pág {pagina} de estoques desde {data_alteracao_estoque_inicial or 'inicio'}.")
-    params = {"pagina": pagina}; 
-    if data_alteracao_estoque_inicial: params["dataAlteracao"] = data_alteracao_estoque_inicial
-    ret, suc = make_api_v2_request(ENDPOINT_LISTA_ATUALIZACOES_ESTOQUE, payload_dict=params)
+    params_api = {"pagina": pagina}; 
+    if data_alteracao_estoque_inicial: params_api["dataAlteracao"] = data_alteracao_estoque_inicial
+    ret, suc = make_api_v2_request(ENDPOINT_LISTA_ATUALIZACOES_ESTOQUE, payload_dict=params_api)
     prods_est_api, num_pags, pag_ok = [],0,False
     if suc and ret: prods_est_api=ret.get("produtos",[]); num_pags=int(ret.get('numero_paginas',0))
     elif not suc: logger.error(f"Falha API estoques pág {pagina}."); return None,0,False
@@ -411,6 +430,7 @@ def processar_atualizacoes_estoque_v2(conn, data_alteracao_estoque_inicial=None,
     return [], num_pags, True
 
 def get_detalhes_pedido_v2(id_pedido_api):
+    """Busca os detalhes de um pedido específico, incluindo seus itens."""
     logger.debug(f"Buscando detalhes pedido ID {id_pedido_api}...")
     ret, suc = make_api_v2_request(ENDPOINT_PEDIDO_OBTER, payload_dict={"id":id_pedido_api})
     if suc and ret and isinstance(ret.get("pedido"),dict): return ret["pedido"]
@@ -418,15 +438,14 @@ def get_detalhes_pedido_v2(id_pedido_api):
     return None
 
 def search_pedidos_v2(conn, data_filtro_inicial=None, data_filtro_final=None, pagina=1):
+    """Busca pedidos e salva, com pós-filtragem de data em modo lote."""
     params_api={"pagina":pagina}; log_msg=""
-    if data_filtro_final: # MODO LOTE (usa data_pedido_inicial e data_pedido_final)
-        params_api["data_pedido_inicial"]=data_filtro_inicial
-        params_api["data_pedido_final"]=data_filtro_final
+    if data_filtro_final: 
+        params_api["data_pedido_inicial"]=data_filtro_inicial; params_api["data_pedido_final"]=data_filtro_final
         log_msg=f"por DATA DO PEDIDO de {data_filtro_inicial} a {data_filtro_final}"
-    elif data_filtro_inicial: # MODO INCREMENTAL (usa dataAlteracaoInicial)
-        params_api["dataAlteracaoInicial"]=data_filtro_inicial
-        log_msg=f"por DATA DE ALTERAÇÃO desde {data_filtro_inicial}"
-    else: log_msg="sem filtro de data específico (buscando todos)" # Não deve acontecer com a lógica do main
+    elif data_filtro_inicial: 
+        params_api["dataAlteracaoInicial"]=data_filtro_inicial; log_msg=f"por DATA DE ALTERAÇÃO desde {data_filtro_inicial}"
+    else: log_msg="sem filtro de data"
     
     logger.info(f"Buscando pág {pagina} de pedidos {log_msg}.")
     ret_api, suc_api = make_api_v2_request(ENDPOINT_PEDIDOS_PESQUISA, payload_dict=params_api)
@@ -437,34 +456,29 @@ def search_pedidos_v2(conn, data_filtro_inicial=None, data_filtro_final=None, pa
     
     if peds_pag and isinstance(peds_pag,list):
         todos_ok,salvos,ignorados_data = True,0,0
-        
-        # Prepara datas para pós-filtragem se estiver em modo lote
         dt_inicio_lote, dt_fim_lote = None, None
-        if data_filtro_final: # Apenas em modo lote
+        if MODO_LOTE_PEDIDOS and data_filtro_final:
             try:
                 dt_inicio_lote = datetime.datetime.strptime(data_filtro_inicial, "%d/%m/%Y")
                 dt_fim_lote = datetime.datetime.strptime(data_filtro_final, "%d/%m/%Y").replace(hour=23, minute=59, second=59)
                 logger.debug(f"Pós-filtragem local de data ativada para pedidos entre {dt_inicio_lote.date()} e {dt_fim_lote.date()}.")
             except ValueError:
                 logger.error(f"Formato de data inválido para pós-filtragem de lote: {data_filtro_inicial} - {data_filtro_final}. Pós-filtragem desativada.")
-                # Não quebra, mas a pós-filtragem não ocorrerá. A API ainda deve ter filtrado.
 
         for ped_w in peds_pag:
             ped_d = ped_w.get("pedido")
             if not ped_d or not isinstance(ped_d,dict): logger.warning(f"Item pedido malformado (pág {pagina}): {ped_w}"); continue
             
-            # Pós-filtragem se em modo lote e datas de lote válidas
             if MODO_LOTE_PEDIDOS and dt_inicio_lote and dt_fim_lote and "data_pedido" in ped_d:
                 try:
                     data_pedido_str = ped_d.get("data_pedido")
                     if data_pedido_str:
-                        data_pedido_dt = datetime.datetime.strptime(data_pedido_str, "%d/%m/%Y") # API retorna dd/mm/aaaa
+                        data_pedido_dt = datetime.datetime.strptime(data_pedido_str, "%d/%m/%Y")
                         if not (dt_inicio_lote <= data_pedido_dt <= dt_fim_lote):
-                            logger.info(f"Pedido ID {ped_d.get('id')} IGNORADO (pós-filtro): data {data_pedido_str} fora do lote {data_filtro_inicial}-{data_filtro_final}.")
+                            logger.info(f"Pedido ID {ped_d.get('id')} IGNORADO (pós-filtro): data {data_pedido_str} fora do lote.")
                             ignorados_data += 1
-                            continue # Pula para o próximo pedido
-                    else: # Pedido sem data_pedido, não podemos pós-filtrar, mas logamos se estivermos em modo lote estrito
-                        logger.warning(f"Pedido ID {ped_d.get('id')} sem 'data_pedido' para pós-filtragem em modo lote.")
+                            continue
+                    else: logger.warning(f"Pedido ID {ped_d.get('id')} sem 'data_pedido' para pós-filtragem em modo lote.")
                 except ValueError:
                     logger.warning(f"Formato de 'data_pedido' ('{ped_d.get('data_pedido')}') inválido no pedido ID {ped_d.get('id')}. Não foi possível pós-filtrar.")
             
@@ -482,12 +496,13 @@ def search_pedidos_v2(conn, data_filtro_inicial=None, data_filtro_final=None, pa
             try:
                 if conn and not conn.closed: conn.commit(); logger.info(f"Pág {pagina} pedidos ({salvos} itens efetivamente salvos) commitada.")
                 pag_ok_db=True
-            except Exception as e: logger.error(f"Erro CRÍTICO commit pág {pagina} pedidos: {e}",True);
-            if conn and not conn.closed and not pag_ok_db: conn.rollback()
+            except Exception as e: 
+                logger.error(f"Erro CRÍTICO commit pág {pagina} pedidos: {e}",True);
+                if conn and not conn.closed: conn.rollback()
         elif not todos_ok and conn and not conn.closed: conn.rollback(); logger.warning(f"Pág {pagina} pedidos com erros. ROLLBACK.")
-        elif todos_ok and salvos == 0 and peds_pag: # Página da API não vazia, nenhum erro, mas nada salvo (ex: todos ignorados pelo pós-filtro)
+        elif todos_ok and salvos == 0 and peds_pag: 
              logger.info(f"Pág {pagina} de pedidos processada, mas nenhum item foi salvo (total ignorados na pág: {ignorados_data}).")
-             pag_ok_db = True # Considera OK para avançar a paginação da API
+             pag_ok_db = True 
         
         return peds_pag, num_pags, pag_ok_db
     
@@ -499,13 +514,13 @@ if __name__ == "__main__":
     logger.info("=== Iniciando Cliente API v2 Tiny ERP ===")
     start_time_total = time.time()
 
-    if MODO_LOTE_PEDIDOS: # Validação das datas do lote
+    if MODO_LOTE_PEDIDOS:
         try:
             datetime.datetime.strptime(DATA_LOTE_PEDIDOS_INICIO_STR, "%d/%m/%Y")
             datetime.datetime.strptime(DATA_LOTE_PEDIDOS_FIM_STR, "%d/%m/%Y")
             logger.info(f"MODO DE LOTE DE PEDIDOS ATIVADO PARA O PERÍODO: {DATA_LOTE_PEDIDOS_INICIO_STR} a {DATA_LOTE_PEDIDOS_FIM_STR}")
         except ValueError:
-            logger.critical(f"Formato de data inválido para DATA_LOTE_PEDIDOS_INICIO_STR ('{DATA_LOTE_PEDIDOS_INICIO_STR}') ou DATA_LOTE_PEDIDOS_FIM_STR ('{DATA_LOTE_PEDIDOS_FIM_STR}'). Use dd/mm/aaaa. Encerrando.")
+            logger.critical(f"Formato de data inválido para lote. Use dd/mm/aaaa. Encerrando.")
             exit(1)
 
     if not all([API_V2_TOKEN, DB_HOST, DB_NAME, DB_USER, DB_PASSWORD]):
@@ -579,8 +594,7 @@ if __name__ == "__main__":
         logger.info("--- PASSO 4: Pedidos e Itens ---")
         ts_inicio_ped = datetime.datetime.now(datetime.timezone.utc)
         etapa_peds_ok = True
-        filtro_ped_data_inicial_api = None
-        filtro_ped_data_final_api = None 
+        filtro_ped_data_inicial_api = None; filtro_ped_data_final_api = None 
         timestamp_para_set_ultima_exec = ts_inicio_ped
 
         if MODO_LOTE_PEDIDOS:
@@ -589,13 +603,12 @@ if __name__ == "__main__":
             try:
                 dt_obj_fim_lote = datetime.datetime.strptime(DATA_LOTE_PEDIDOS_FIM_STR, "%d/%m/%Y")
                 timestamp_para_set_ultima_exec = dt_obj_fim_lote.replace(hour=23, minute=59, second=59, tzinfo=datetime.timezone.utc)
-            except ValueError: # Erro já logado na validação inicial, mas garante fallback
-                etapa_peds_ok = False 
+            except ValueError: etapa_peds_ok = False # Erro já logado na validação inicial
         else: 
             ultima_exec_ped_str = get_ultima_execucao(db_conn, PROCESSO_PEDIDOS)
             filtro_ped_data_inicial_api = ultima_exec_ped_str if ultima_exec_ped_str else DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL
         
-        total_peds_listados_etapa, pag_ped, total_pedidos_ignorados_data = 0,1,0
+        total_peds_listados_etapa, pag_ped = 0,1
         if etapa_peds_ok:
             log_msg_filtro_ped = f"Filtro Inicial: {filtro_ped_data_inicial_api}"
             if filtro_ped_data_final_api: log_msg_filtro_ped += f", Filtro Final: {filtro_ped_data_final_api}"
@@ -603,28 +616,13 @@ if __name__ == "__main__":
             
             while True: 
                 logger.info(f"Processando pág {pag_ped} pedidos...")
-                peds_pag_api_lista, total_pags_ped, pag_commit_ped = search_pedidos_v2(
-                    db_conn, 
-                    data_filtro_inicial=filtro_ped_data_inicial_api, 
-                    data_filtro_final=filtro_ped_data_final_api,
-                    pagina=pag_ped
-                )
-                # A função search_pedidos_v2 agora pode retornar a lista de pedidos processados/ignorados
-                # e um contador de ignorados, se modificarmos ela para tal.
-                # Por ora, vamos assumir que ela retorna a lista da API e o sucesso do DB.
-                # A contagem de ignorados está dentro de search_pedidos_v2.
-
-                if peds_pag_api_lista is None: 
-                    logger.error(f"Falha crítica (API) pág {pag_ped} pedidos. Interrompendo."); etapa_peds_ok=False; break
-                if not pag_commit_ped and peds_pag_api_lista: 
-                    logger.warning(f"Pág {pag_ped} pedidos não commitada devido a erros. Interrompendo etapa."); etapa_peds_ok=False; break
-                if peds_pag_api_lista: 
-                    total_peds_listados_etapa += len(peds_pag_api_lista) # Poderia ser len dos efetivamente salvos.
-                if total_pags_ped == 0 or pag_ped >= total_pags_ped: 
-                    logger.info("Todas págs de pedidos processadas para o período/filtro atual."); break
+                peds_pag, total_pags_ped, pag_commit_ped = search_pedidos_v2(db_conn, filtro_ped_data_inicial_api, filtro_ped_data_final_api, pag_ped)
+                if peds_pag is None: logger.error(f"Falha crítica (API) pág {pag_ped} pedidos. Interrompendo."); etapa_peds_ok=False; break
+                if not pag_commit_ped and peds_pag: logger.warning(f"Pág {pag_ped} pedidos não commitada. Interrompendo."); etapa_peds_ok=False; break
+                if peds_pag: total_peds_listados_etapa += len(peds_pag)
+                if total_pags_ped == 0 or pag_ped >= total_pags_ped: logger.info("Todas págs de pedidos processadas para o período/filtro atual."); break
                 pag_ped += 1
-                if pag_ped <= total_pags_ped: 
-                    logger.info("Pausa (1s) antes da próxima pág de pedidos..."); time.sleep(1) 
+                if pag_ped <= total_pags_ped: logger.info("Pausa (1s) antes da próxima pág de pedidos..."); time.sleep(1) 
         
         if etapa_peds_ok: 
             set_ultima_execucao(db_conn,PROCESSO_PEDIDOS,timestamp_para_set_ultima_exec)
