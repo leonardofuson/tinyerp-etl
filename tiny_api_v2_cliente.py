@@ -43,18 +43,21 @@ PROCESSO_PRODUTOS = "produtos"
 PROCESSO_ESTOQUES = "estoques"
 PROCESSO_PEDIDOS = "pedidos"
 
-# --- CONFIGURAÇÕES GERAIS DE EXECUÇÃO ---
 DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL = "01/10/2024 00:00:00"
 DEFAULT_API_TIMEOUT = 90
 RETRY_DELAY_429 = 30 
 MAX_PAGINAS_POR_ETAPA = 100 
 
 # --- CONFIGURAÇÃO PARA CARGA DE PEDIDOS EM LOTE ---
-MODO_LOTE_PEDIDOS = False 
-DATA_LOTE_PEDIDOS_INICIO_STR = "01/10/2024" 
-DATA_LOTE_PEDIDOS_FIM_STR = "31/10/2024"   
+# Altere MODO_LOTE_PEDIDOS para True para carregar um lote específico.
+# Após carregar todos os lotes desejados, volte para False.
+MODO_LOTE_PEDIDOS = True  # ATIVADO PARA CARREGAR O LOTE ABAIXO
+# --- Edite estas datas para o próximo mês a ser processado ---
+DATA_LOTE_PEDIDOS_INICIO_STR = "01/06/2025" # Exemplo: configurado para Junho
+DATA_LOTE_PEDIDOS_FIM_STR = "30/06/2025"   # Exemplo: configurado para Junho
 # -------------------------------------------------
 
+# --- Função Auxiliar para Conversão ---
 def safe_float_convert(value_str, default=0.0):
     """Converte uma string para float de forma segura, tratando None, ',', e strings vazias."""
     if value_str is None: return default
@@ -65,6 +68,7 @@ def safe_float_convert(value_str, default=0.0):
         logger.debug(f"Não foi possível converter '{value_str}' para float, usando {default}.")
         return default
 
+# --- Funções de Banco de Dados (PostgreSQL) ---
 def get_db_connection(max_retries=3, retry_delay=10):
     """Estabelece e retorna uma conexão com o banco de dados PostgreSQL, com retries."""
     conn = None; attempt = 0
@@ -299,7 +303,6 @@ def make_api_v2_request(endpoint_path, method="GET", payload_dict=None,
                 
                 logger.error(f"API Tiny: Status '{status_api}' (Endpoint: {endpoint_path}). Código: {cod_err}. Msg: {msg_err}. Resp: {str(retorno)[:500]}")
                 
-                # *** LÓGICA DE RETRY PARA ERRO 35 ***
                 if cod_err == "35": # Erro genérico "tente novamente mais tarde"
                     logger.warning(f"Erro de consulta (35) na API. Forçando retentativa...")
                     raise requests.exceptions.RequestException("Forçando retry para erro 35 da API")
@@ -649,10 +652,10 @@ if __name__ == "__main__":
         else: logger.warning("Não foi possível contar registros, DB fechado/indisponível.")
             
     except KeyboardInterrupt:
-        logger.warning("Processo interrompido (KeyboardInterrupt).")
+        logger.warning("Interrompido (KeyboardInterrupt).")
         if db_conn and not db_conn.closed: 
             try: db_conn.rollback(); logger.info("Rollback por KI bem-sucedido.")
-            except Exception as e_roll_ki: logger.error(f"Erro no rollback após KeyboardInterrupt: {e_roll_ki}", exc_info=True)
+            except Exception as e: logger.error(f"Erro no rollback KI: {e}",True)
     except Exception as e_geral:
         logger.critical(f"ERRO GERAL NO PROCESSAMENTO: {e_geral}", exc_info=True)
         if db_conn and not db_conn.closed: 
