@@ -43,23 +43,22 @@ PROCESSO_PRODUTOS = "produtos"
 PROCESSO_ESTOQUES = "estoques"
 PROCESSO_PEDIDOS = "pedidos"
 
+# --- CONFIGURAÇÕES GERAIS DE EXECUÇÃO ---
 DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL = "01/10/2024 00:00:00"
 DEFAULT_API_TIMEOUT = 90
 RETRY_DELAY_429 = 30 
-MAX_PAGINAS_POR_ETAPA = 100 
+# Limita o número de páginas a serem processadas em uma única execução para evitar timeouts do cronjob.
+# Definido um valor muito alto para efetivamente desativar o limite para a carga dos lotes mensais.
+MAX_PAGINAS_POR_ETAPA = 999999 
 
 # --- CONFIGURAÇÃO PARA CARGA DE PEDIDOS EM LOTE ---
-# Altere MODO_LOTE_PEDIDOS para True para carregar um lote específico.
-# Após carregar todos os lotes desejados, volte para False.
-MODO_LOTE_PEDIDOS = True  # ATIVADO PARA CARREGAR O LOTE ABAIXO
+MODO_LOTE_PEDIDOS = True 
 # --- Edite estas datas para o próximo mês a ser processado ---
-DATA_LOTE_PEDIDOS_INICIO_STR = "01/06/2025" # Exemplo: configurado para Junho
-DATA_LOTE_PEDIDOS_FIM_STR = "30/06/2025"   # Exemplo: configurado para Junho
+DATA_LOTE_PEDIDOS_INICIO_STR = "01/06/2025" # Configurado para Junho
+DATA_LOTE_PEDIDOS_FIM_STR = "30/06/2025"   # Configurado para Junho
 # -------------------------------------------------
 
-# --- Função Auxiliar para Conversão ---
 def safe_float_convert(value_str, default=0.0):
-    """Converte uma string para float de forma segura, tratando None, ',', e strings vazias."""
     if value_str is None: return default
     value_str = str(value_str).strip().replace(',', '.')
     if not value_str: return default
@@ -68,9 +67,7 @@ def safe_float_convert(value_str, default=0.0):
         logger.debug(f"Não foi possível converter '{value_str}' para float, usando {default}.")
         return default
 
-# --- Funções de Banco de Dados (PostgreSQL) ---
 def get_db_connection(max_retries=3, retry_delay=10):
-    """Estabelece e retorna uma conexão com o banco de dados PostgreSQL, com retries."""
     conn = None; attempt = 0
     while attempt < max_retries:
         try:
@@ -88,7 +85,6 @@ def get_db_connection(max_retries=3, retry_delay=10):
     return None
 
 def criar_tabelas_db(conn):
-    """Cria as tabelas no banco de dados se elas não existirem."""
     commands = (
         """CREATE TABLE IF NOT EXISTS categorias (id_categoria INTEGER PRIMARY KEY, descricao_categoria TEXT NOT NULL, id_categoria_pai INTEGER, FOREIGN KEY (id_categoria_pai) REFERENCES categorias (id_categoria) ON DELETE SET NULL);""",
         """CREATE TABLE IF NOT EXISTS produtos (id_produto INTEGER PRIMARY KEY, nome_produto TEXT, codigo_produto TEXT UNIQUE, preco_produto REAL, unidade_produto TEXT, situacao_produto TEXT, data_criacao_produto TEXT, gtin_produto TEXT, preco_promocional_produto REAL, preco_custo_produto REAL, preco_custo_medio_produto REAL, tipo_variacao_produto TEXT);""",
@@ -110,7 +106,6 @@ def criar_tabelas_db(conn):
         raise
 
 def get_ultima_execucao(conn, nome_processo):
-    """Obtém o timestamp da última execução bem-sucedida de um processo."""
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT timestamp_ultima_execucao FROM script_ultima_execucao WHERE nome_processo = %s", (nome_processo,))
@@ -120,7 +115,6 @@ def get_ultima_execucao(conn, nome_processo):
     return None
 
 def set_ultima_execucao(conn, nome_processo, timestamp=None):
-    """Define o timestamp da última execução de um processo."""
     ts = timestamp or datetime.datetime.now(datetime.timezone.utc)
     try:
         with conn.cursor() as cur:
@@ -134,7 +128,6 @@ def set_ultima_execucao(conn, nome_processo, timestamp=None):
         if conn and not conn.closed: conn.rollback()
 
 def salvar_categoria_db(conn, categoria_dict, id_pai=None):
-    """Salva uma categoria e suas subcategorias recursivamente."""
     cat_id_str = categoria_dict.get("id"); cat_desc = categoria_dict.get("descricao")
     if cat_id_str and cat_desc: 
         try:
@@ -147,7 +140,6 @@ def salvar_categoria_db(conn, categoria_dict, id_pai=None):
         except Exception as e: logger.error(f"Erro PostgreSQL ao salvar categoria ID '{cat_id_str}': {e}", exc_info=True)
 
 def salvar_produto_db(conn, produto_api_data):
-    """Salva os dados cadastrais de um produto no banco."""
     id_prod_str = str(produto_api_data.get("id","")).strip()
     if not id_prod_str or not id_prod_str.isdigit(): raise ValueError(f"ID do produto inválido: {id_prod_str}")
     id_prod = int(id_prod_str)
@@ -165,7 +157,6 @@ def salvar_produto_db(conn, produto_api_data):
     except Exception as e: logger.error(f"Erro ao salvar produto ID '{id_prod_str}': {e}", exc_info=True); raise
 
 def salvar_produto_categorias_db(conn, id_produto, categorias_lista_api):
-    """Salva o relacionamento produto-categorias usando execute_values."""
     if not isinstance(id_produto, int): raise ValueError(f"ID do produto inválido: {id_produto}")
     try:
         with conn.cursor() as cur:
@@ -176,7 +167,6 @@ def salvar_produto_categorias_db(conn, id_produto, categorias_lista_api):
     except Exception as e: logger.error(f"Erro ao salvar categorias do produto ID {id_produto}: {e}", exc_info=True); raise
 
 def salvar_produto_estoque_total_db(conn, id_produto, nome_produto, saldo_total_api, saldo_reservado_api, data_ultima_atualizacao_estoque=None):
-    """Salva o estoque total de um produto."""
     id_p = int(id_produto)
     try:
         st = safe_float_convert(saldo_total_api); sr = safe_float_convert(saldo_reservado_api); dt_att = None
@@ -196,7 +186,6 @@ def salvar_produto_estoque_total_db(conn, id_produto, nome_produto, saldo_total_
     except Exception as e: logger.error(f"Erro ao salvar estoque total para Produto ID {id_produto}: {e}", exc_info=True); raise
 
 def salvar_estoque_por_deposito_db(conn, id_produto, nome_produto, lista_depositos_api):
-    """Salva o estoque por depósito de um produto."""
     id_p = int(id_produto)
     try:
         with conn.cursor() as cur:
@@ -214,7 +203,6 @@ def salvar_estoque_por_deposito_db(conn, id_produto, nome_produto, lista_deposit
     except Exception as e: logger.error(f"Erro ao salvar estoque por depósito para Produto ID {id_produto}: {e}", exc_info=True); raise
 
 def salvar_pedido_db(conn, pedido_api_data):
-    """Salva os dados de um pedido no banco."""
     id_ped_str = str(pedido_api_data.get("id","")).strip()
     if not id_ped_str or not id_ped_str.isdigit(): raise ValueError(f"ID do pedido inválido: {id_ped_str}")
     id_ped = int(id_ped_str)
@@ -237,7 +225,6 @@ def salvar_pedido_db(conn, pedido_api_data):
     except Exception as e: logger.error(f"Erro ao salvar pedido ID '{id_ped_str}': {e}", exc_info=True); raise
 
 def salvar_pedido_itens_db(conn, id_pedido_api, itens_lista_api):
-    """Salva os itens de um pedido no banco usando execute_values."""
     id_ped_int = int(id_pedido_api)
     try:
         with conn.cursor() as cur:
@@ -260,7 +247,6 @@ def salvar_pedido_itens_db(conn, id_pedido_api, itens_lista_api):
 
 def make_api_v2_request(endpoint_path, method="GET", payload_dict=None, 
                         max_retries=3, initial_retry_delay=2, timeout_seconds=DEFAULT_API_TIMEOUT):
-    """Realiza uma requisição para a API v2 do Tiny ERP, com retries para erros de rede e erros específicos da API."""
     full_url = f"{BASE_URL_V2}{endpoint_path}"
     base_params = {"token": API_V2_TOKEN, "formato": "json"}
     all_params = base_params.copy(); 
@@ -340,7 +326,6 @@ def make_api_v2_request(endpoint_path, method="GET", payload_dict=None,
     return None, False
 
 def get_categorias_v2(conn):
-    """Busca todas as categorias da API e as salva no banco."""
     logger.info("Iniciando Categorias.")
     lista_cats, suc = make_api_v2_request(ENDPOINT_CATEGORIAS)
     if suc and isinstance(lista_cats, list):
@@ -363,7 +348,6 @@ def get_categorias_v2(conn):
     return False
 
 def get_produto_detalhes_v2(id_produto_tiny):
-    """Busca os detalhes de um produto específico, incluindo suas categorias."""
     logger.debug(f"Buscando detalhes produto ID {id_produto_tiny}...")
     ret, suc = make_api_v2_request(ENDPOINT_PRODUTO_OBTER, payload_dict={"id": id_produto_tiny})
     if suc and ret and isinstance(ret.get("produto"), dict): return ret["produto"]
@@ -371,7 +355,6 @@ def get_produto_detalhes_v2(id_produto_tiny):
     return None
 
 def search_produtos_v2(conn, data_alteracao_inicial=None, pagina=1):
-    """Busca produtos (cadastrais e categorias) e os salva. Retorna (lista_api, num_pags, sucesso_db_pag)."""
     logger.info(f"Buscando pág {pagina} de produtos desde {data_alteracao_inicial or 'inicio'}.")
     params = {"pagina": pagina}; 
     if data_alteracao_inicial: params["dataAlteracaoInicial"] = data_alteracao_inicial
@@ -403,7 +386,6 @@ def search_produtos_v2(conn, data_alteracao_inicial=None, pagina=1):
     return [], num_pags_tot, True
 
 def processar_atualizacoes_estoque_v2(conn, data_alteracao_estoque_inicial=None, pagina=1):
-    """Busca atualizações de estoque e salva. Retorna (lista_api, num_pags, sucesso_db_pag)."""
     logger.info(f"Buscando pág {pagina} de estoques desde {data_alteracao_estoque_inicial or 'inicio'}.")
     params_api = {"pagina": pagina}; 
     if data_alteracao_estoque_inicial: params_api["dataAlteracao"] = data_alteracao_estoque_inicial
@@ -439,7 +421,6 @@ def processar_atualizacoes_estoque_v2(conn, data_alteracao_estoque_inicial=None,
     return [], num_pags, True
 
 def get_detalhes_pedido_v2(id_pedido_api):
-    """Busca os detalhes de um pedido específico, incluindo seus itens."""
     logger.debug(f"Buscando detalhes pedido ID {id_pedido_api}...")
     ret, suc = make_api_v2_request(ENDPOINT_PEDIDO_OBTER, payload_dict={"id":id_pedido_api})
     if suc and ret and isinstance(ret.get("pedido"),dict): return ret["pedido"]
@@ -447,7 +428,6 @@ def get_detalhes_pedido_v2(id_pedido_api):
     return None
 
 def search_pedidos_v2(conn, data_filtro_inicial=None, data_filtro_final=None, pagina=1):
-    """Busca pedidos e salva, com pós-filtragem de data em modo lote."""
     params_api={"pagina":pagina}; log_msg=""
     if data_filtro_final: 
         params_api["data_pedido_inicial"]=data_filtro_inicial; params_api["data_pedido_final"]=data_filtro_final
