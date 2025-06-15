@@ -48,14 +48,14 @@ DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL = "01/10/2024 00:00:00"
 DEFAULT_API_TIMEOUT = 90
 RETRY_DELAY_429 = 30 
 # Limita o número de páginas a serem processadas em uma única execução para evitar timeouts do cronjob.
-# Definido um valor muito alto para efetivamente desativar o limite para a carga dos lotes mensais.
-MAX_PAGINAS_POR_ETAPA = 999999 
+MAX_PAGINAS_POR_ETAPA = 400 # Ajustado conforme solicitado
 
 # --- CONFIGURAÇÃO PARA CARGA DE PEDIDOS EM LOTE ---
-MODO_LOTE_PEDIDOS = True 
-# --- Edite estas datas para o próximo mês a ser processado ---
-DATA_LOTE_PEDIDOS_INICIO_STR = "01/06/2025" # Configurado para Junho
-DATA_LOTE_PEDIDOS_FIM_STR = "30/06/2025"   # Configurado para Junho
+# MODO DE LOTE DESATIVADO PARA OPERAÇÃO NORMAL/PRODUÇÃO
+MODO_LOTE_PEDIDOS = False 
+# As variáveis abaixo são ignoradas quando MODO_LOTE_PEDIDOS é False
+DATA_LOTE_PEDIDOS_INICIO_STR = "01/06/2025" 
+DATA_LOTE_PEDIDOS_FIM_STR = "30/06/2025"   
 # -------------------------------------------------
 
 def safe_float_convert(value_str, default=0.0):
@@ -289,7 +289,7 @@ def make_api_v2_request(endpoint_path, method="GET", payload_dict=None,
                 
                 logger.error(f"API Tiny: Status '{status_api}' (Endpoint: {endpoint_path}). Código: {cod_err}. Msg: {msg_err}. Resp: {str(retorno)[:500]}")
                 
-                if cod_err == "35": # Erro genérico "tente novamente mais tarde"
+                if cod_err == "35": 
                     logger.warning(f"Erro de consulta (35) na API. Forçando retentativa...")
                     raise requests.exceptions.RequestException("Forçando retry para erro 35 da API")
                 
@@ -326,6 +326,7 @@ def make_api_v2_request(endpoint_path, method="GET", payload_dict=None,
     return None, False
 
 def get_categorias_v2(conn):
+    """Busca todas as categorias da API e as salva no banco."""
     logger.info("Iniciando Categorias.")
     lista_cats, suc = make_api_v2_request(ENDPOINT_CATEGORIAS)
     if suc and isinstance(lista_cats, list):
@@ -348,6 +349,7 @@ def get_categorias_v2(conn):
     return False
 
 def get_produto_detalhes_v2(id_produto_tiny):
+    """Busca os detalhes de um produto específico, incluindo suas categorias."""
     logger.debug(f"Buscando detalhes produto ID {id_produto_tiny}...")
     ret, suc = make_api_v2_request(ENDPOINT_PRODUTO_OBTER, payload_dict={"id": id_produto_tiny})
     if suc and ret and isinstance(ret.get("produto"), dict): return ret["produto"]
@@ -355,6 +357,7 @@ def get_produto_detalhes_v2(id_produto_tiny):
     return None
 
 def search_produtos_v2(conn, data_alteracao_inicial=None, pagina=1):
+    """Busca produtos (cadastrais e categorias) e os salva. Retorna (lista_api, num_pags, sucesso_db_pag)."""
     logger.info(f"Buscando pág {pagina} de produtos desde {data_alteracao_inicial or 'inicio'}.")
     params = {"pagina": pagina}; 
     if data_alteracao_inicial: params["dataAlteracaoInicial"] = data_alteracao_inicial
@@ -386,6 +389,7 @@ def search_produtos_v2(conn, data_alteracao_inicial=None, pagina=1):
     return [], num_pags_tot, True
 
 def processar_atualizacoes_estoque_v2(conn, data_alteracao_estoque_inicial=None, pagina=1):
+    """Busca atualizações de estoque e salva. Retorna (lista_api, num_pags, sucesso_db_pag)."""
     logger.info(f"Buscando pág {pagina} de estoques desde {data_alteracao_estoque_inicial or 'inicio'}.")
     params_api = {"pagina": pagina}; 
     if data_alteracao_estoque_inicial: params_api["dataAlteracao"] = data_alteracao_estoque_inicial
@@ -421,6 +425,7 @@ def processar_atualizacoes_estoque_v2(conn, data_alteracao_estoque_inicial=None,
     return [], num_pags, True
 
 def get_detalhes_pedido_v2(id_pedido_api):
+    """Busca os detalhes de um pedido específico, incluindo seus itens."""
     logger.debug(f"Buscando detalhes pedido ID {id_pedido_api}...")
     ret, suc = make_api_v2_request(ENDPOINT_PEDIDO_OBTER, payload_dict={"id":id_pedido_api})
     if suc and ret and isinstance(ret.get("pedido"),dict): return ret["pedido"]
@@ -428,6 +433,7 @@ def get_detalhes_pedido_v2(id_pedido_api):
     return None
 
 def search_pedidos_v2(conn, data_filtro_inicial=None, data_filtro_final=None, pagina=1):
+    """Busca pedidos e salva, com pós-filtragem de data em modo lote."""
     params_api={"pagina":pagina}; log_msg=""
     if data_filtro_final: 
         params_api["data_pedido_inicial"]=data_filtro_inicial; params_api["data_pedido_final"]=data_filtro_final
