@@ -44,20 +44,13 @@ PROCESSO_ESTOQUES = "estoques"
 PROCESSO_PEDIDOS = "pedidos"
 
 # --- CONFIGURAÇÕES GERAIS DE EXECUÇÃO ---
-DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL = "01/10/2024 00:00:00"
+DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL = "01/10/2024 00:00:00" # Usado para Produtos na primeira vez
 DEFAULT_API_TIMEOUT = 90
 RETRY_DELAY_429 = 30 
-# Limita o número de páginas a serem processadas em uma única execução para evitar timeouts do cronjob.
-MAX_PAGINAS_POR_ETAPA = 400 # Ajustado conforme solicitado
+DIAS_PARA_BUSCA_PEDIDOS = 60 # Janela de busca de alterações para pedidos
+MAX_PAGINAS_POR_ETAPA = 999999 # Limite efetivamente desativado para produção normal
 
-# --- CONFIGURAÇÃO PARA CARGA DE PEDIDOS EM LOTE ---
-# MODO DE LOTE DESATIVADO PARA OPERAÇÃO NORMAL/PRODUÇÃO
-MODO_LOTE_PEDIDOS = False 
-# As variáveis abaixo são ignoradas quando MODO_LOTE_PEDIDOS é False
-DATA_LOTE_PEDIDOS_INICIO_STR = "01/06/2025" 
-DATA_LOTE_PEDIDOS_FIM_STR = "30/06/2025"   
-# -------------------------------------------------
-
+# --- Função Auxiliar para Conversão ---
 def safe_float_convert(value_str, default=0.0):
     if value_str is None: return default
     value_str = str(value_str).strip().replace(',', '.')
@@ -67,6 +60,7 @@ def safe_float_convert(value_str, default=0.0):
         logger.debug(f"Não foi possível converter '{value_str}' para float, usando {default}.")
         return default
 
+# --- Funções de Banco de Dados (PostgreSQL) ---
 def get_db_connection(max_retries=3, retry_delay=10):
     conn = None; attempt = 0
     while attempt < max_retries:
@@ -432,15 +426,12 @@ def get_detalhes_pedido_v2(id_pedido_api):
     logger.warning(f"Pedido ID {id_pedido_api} sem detalhes API ou erro.")
     return None
 
-def search_pedidos_v2(conn, data_filtro_inicial=None, data_filtro_final=None, pagina=1):
-    """Busca pedidos e salva, com pós-filtragem de data em modo lote."""
-    params_api={"pagina":pagina}; log_msg=""
-    if data_filtro_final: 
-        params_api["data_pedido_inicial"]=data_filtro_inicial; params_api["data_pedido_final"]=data_filtro_final
-        log_msg=f"por DATA DO PEDIDO de {data_filtro_inicial} a {data_filtro_final}"
-    elif data_filtro_inicial: 
-        params_api["dataAlteracaoInicial"]=data_filtro_inicial; log_msg=f"por DATA DE ALTERAÇÃO desde {data_filtro_inicial}"
-    else: log_msg="sem filtro de data"
+def search_pedidos_v2(conn, data_alteracao_inicial=None, pagina=1):
+    """Busca pedidos por DATA DE ALTERAÇÃO e os salva. Retorna (lista_api, num_pags, sucesso_db_pag)."""
+    params_api={"pagina":pagina}; 
+    if data_alteracao_inicial: 
+        params_api["dataAlteracaoInicial"]=data_alteracao_inicial
+    log_msg=f"por DATA DE ALTERAÇÃO desde {data_alteracao_inicial or 'inicio'}"
     
     logger.info(f"Buscando pág {pagina} de pedidos {log_msg}.")
     ret_api, suc_api = make_api_v2_request(ENDPOINT_PEDIDOS_PESQUISA, payload_dict=params_api)
@@ -450,32 +441,10 @@ def search_pedidos_v2(conn, data_filtro_inicial=None, data_filtro_final=None, pa
     elif not suc_api: logger.error(f"Falha API pedidos pág {pagina} {log_msg}."); return None,0,False
     
     if peds_pag and isinstance(peds_pag,list):
-        todos_ok,salvos,ignorados_data = True,0,0
-        dt_inicio_lote, dt_fim_lote = None, None
-        if MODO_LOTE_PEDIDOS and data_filtro_final:
-            try:
-                dt_inicio_lote = datetime.datetime.strptime(data_filtro_inicial, "%d/%m/%Y")
-                dt_fim_lote = datetime.datetime.strptime(data_filtro_final, "%d/%m/%Y").replace(hour=23, minute=59, second=59)
-                logger.debug(f"Pós-filtragem local de data ativada para pedidos entre {dt_inicio_lote.date()} e {dt_fim_lote.date()}.")
-            except ValueError:
-                logger.error(f"Formato de data inválido para pós-filtragem de lote: {data_filtro_inicial} - {data_filtro_final}. Pós-filtragem desativada.")
-
+        todos_ok,salvos = True,0
         for ped_w in peds_pag:
             ped_d = ped_w.get("pedido")
             if not ped_d or not isinstance(ped_d,dict): logger.warning(f"Item pedido malformado (pág {pagina}): {ped_w}"); continue
-            
-            if MODO_LOTE_PEDIDOS and dt_inicio_lote and dt_fim_lote and "data_pedido" in ped_d:
-                try:
-                    data_pedido_str = ped_d.get("data_pedido")
-                    if data_pedido_str:
-                        data_pedido_dt = datetime.datetime.strptime(data_pedido_str, "%d/%m/%Y")
-                        if not (dt_inicio_lote <= data_pedido_dt <= dt_fim_lote):
-                            logger.info(f"Pedido ID {ped_d.get('id')} IGNORADO (pós-filtro): data {data_pedido_str} fora do lote.")
-                            ignorados_data += 1
-                            continue
-                    else: logger.warning(f"Pedido ID {ped_d.get('id')} sem 'data_pedido' para pós-filtragem em modo lote.")
-                except ValueError:
-                    logger.warning(f"Formato de 'data_pedido' ('{ped_d.get('data_pedido')}') inválido no pedido ID {ped_d.get('id')}. Não foi possível pós-filtrar.")
             
             id_ped_str = str(ped_d.get("id","")).strip()
             try:
@@ -485,8 +454,6 @@ def search_pedidos_v2(conn, data_filtro_inicial=None, data_filtro_final=None, pa
                 salvos+=1
             except Exception as e: logger.error(f"Erro no pedido ID '{id_ped_str}' (pág {pagina}): {e}",True); todos_ok=False; break
         
-        if ignorados_data > 0: logger.info(f"Pág {pagina} pedidos: {ignorados_data} pedidos ignorados pela pós-filtragem de data.")
-
         if todos_ok and salvos > 0:
             try:
                 if conn and not conn.closed: conn.commit(); logger.info(f"Pág {pagina} pedidos ({salvos} itens efetivamente salvos) commitada.")
@@ -495,31 +462,23 @@ def search_pedidos_v2(conn, data_filtro_inicial=None, data_filtro_final=None, pa
                 logger.error(f"Erro CRÍTICO commit pág {pagina} pedidos: {e}",True);
                 if conn and not conn.closed: conn.rollback()
         elif not todos_ok and conn and not conn.closed: conn.rollback(); logger.warning(f"Pág {pagina} pedidos com erros. ROLLBACK.")
-        elif todos_ok and salvos == 0 and peds_pag: 
-             logger.info(f"Pág {pagina} de pedidos processada, mas nenhum item foi salvo (total ignorados na pág: {ignorados_data}).")
-             pag_ok_db = True 
         
         return peds_pag, num_pags, pag_ok_db
     
     logger.info(f"Nenhum pedido API para pág {pagina} {log_msg} ou estrutura inválida.")
     return [],num_pags,True
 
+
 # --- Bloco Principal de Execução ---
 if __name__ == "__main__":
-    logger.info("=== Iniciando Cliente API v2 Tiny ERP ===")
+    logger.info("=== Iniciando Cliente API v2 Tiny ERP - MODO PRODUÇÃO ===")
     start_time_total = time.time()
 
-    if MODO_LOTE_PEDIDOS:
-        try:
-            datetime.datetime.strptime(DATA_LOTE_PEDIDOS_INICIO_STR, "%d/%m/%Y")
-            datetime.datetime.strptime(DATA_LOTE_PEDIDOS_FIM_STR, "%d/%m/%Y")
-            logger.info(f"MODO DE LOTE DE PEDIDOS ATIVADO PARA O PERÍODO: {DATA_LOTE_PEDIDOS_INICIO_STR} a {DATA_LOTE_PEDIDOS_FIM_STR}")
-        except ValueError:
-            logger.critical(f"Formato de data inválido para lote. Use dd/mm/aaaa. Encerrando.")
-            exit(1)
-
-    if not all([API_V2_TOKEN, DB_HOST, DB_NAME, DB_USER, DB_PASSWORD]):
-        logger.critical("Variáveis de ambiente cruciais não configuradas. Encerrando."); exit(1)
+    required_vars = {"TINY_API_V2_TOKEN": API_V2_TOKEN, "DB_HOST": DB_HOST, "DB_NAME": DB_NAME, "DB_USER": DB_USER, "DB_PASSWORD": DB_PASSWORD}
+    missing_vars = [var for var, value in required_vars.items() if not value]
+    if missing_vars:
+        logger.critical(f"Variáveis de ambiente obrigatórias não configuradas: {', '.join(missing_vars)}. Encerrando.")
+        exit(1)
     
     db_conn = get_db_connection()
     if db_conn is None or (hasattr(db_conn, 'closed') and db_conn.closed):
@@ -534,7 +493,7 @@ if __name__ == "__main__":
         else: logger.warning("Passo 1 (Categorias) com falhas.")
         logger.info("-" * 70)
         
-        # PASSO 2: Produtos Cadastrais e Categorias
+        # PASSO 2: Produtos Cadastrais e Categorias (Incremental com timestamp)
         logger.info("--- PASSO 2: Produtos (Cadastrais e Categorias) ---")
         ultima_exec_prod_str = get_ultima_execucao(db_conn, PROCESSO_PRODUTOS)
         data_filtro_prod = ultima_exec_prod_str if ultima_exec_prod_str else DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL
@@ -553,7 +512,7 @@ if __name__ == "__main__":
         else: logger.warning("Passo 2 (Produtos) com erros. Timestamp NÃO OK.")
         logger.info("-" * 70)
         
-        # PASSO 3: Atualizações de Estoque
+        # PASSO 3: Atualizações de Estoque (Janela de ~29 dias da API)
         logger.info("--- PASSO 3: Atualizações de Estoque ---")
         ultima_exec_est_str = get_ultima_execucao(db_conn, PROCESSO_ESTOQUES); filtro_est_api = None
         hoje = datetime.datetime.now(datetime.timezone.utc); dias_lim = 29; data_lim_api_dt = hoje - datetime.timedelta(days=dias_lim)
@@ -569,7 +528,6 @@ if __name__ == "__main__":
                 logger.error(f"Data inválida para ultima_exec_estoques: {ultima_exec_est_str}. Usando filtro de {dias_lim} dias."); filtro_est_api = data_lim_api_dt.strftime("%d/%m/%Y %H:%M:%S")
         else: 
             logger.info(f"Primeira execução de estoques. Busca limitada últimos {dias_lim} dias ({data_lim_api_dt.strftime('%d/%m/%Y %H:%M:%S %Z')}).")
-            logger.warning("Para carga inicial completa de todos os estoques, uma estratégia de busca individual seria necessária na primeira vez.")
             filtro_est_api = data_lim_api_dt.strftime("%d/%m/%Y %H:%M:%S")
         total_est_listados, pag_est, ts_inicio_est, etapa_est_ok = 0,1,datetime.datetime.now(datetime.timezone.utc),True
         logger.info(f"Buscando atualizações estoque desde: {filtro_est_api}.")
@@ -586,46 +544,37 @@ if __name__ == "__main__":
         else: logger.warning("Passo 3 (Estoques) com erros. Timestamp NÃO OK.")
         logger.info("-" * 70)
 
-        # PASSO 4: Pedidos e Itens
-        logger.info("--- PASSO 4: Pedidos e Itens ---")
+        # PASSO 4: Pedidos (Janela Móvel de 60 dias)
+        logger.info("--- PASSO 4: Pedidos e Itens (Janela Móvel) ---")
         ts_inicio_ped = datetime.datetime.now(datetime.timezone.utc)
         etapa_peds_ok = True
-        filtro_ped_data_inicial_api = None; filtro_ped_data_final_api = None 
-        timestamp_para_set_ultima_exec = ts_inicio_ped
-
-        if MODO_LOTE_PEDIDOS:
-            filtro_ped_data_inicial_api = DATA_LOTE_PEDIDOS_INICIO_STR
-            filtro_ped_data_final_api = DATA_LOTE_PEDIDOS_FIM_STR
-            try:
-                dt_obj_fim_lote = datetime.datetime.strptime(DATA_LOTE_PEDIDOS_FIM_STR, "%d/%m/%Y")
-                timestamp_para_set_ultima_exec = dt_obj_fim_lote.replace(hour=23, minute=59, second=59, tzinfo=datetime.timezone.utc)
-            except ValueError: etapa_peds_ok = False 
-        else: 
-            ultima_exec_ped_str = get_ultima_execucao(db_conn, PROCESSO_PEDIDOS)
-            filtro_ped_data_inicial_api = ultima_exec_ped_str if ultima_exec_ped_str else DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL
         
-        total_peds_listados_etapa, pag_ped = 0,1
-        if etapa_peds_ok:
-            log_msg_filtro_ped = f"Filtro Inicial: {filtro_ped_data_inicial_api}"
-            if filtro_ped_data_final_api: log_msg_filtro_ped += f", Filtro Final: {filtro_ped_data_final_api}"
-            logger.info(f"Buscando pedidos ({log_msg_filtro_ped}).")
-            
-            while pag_ped <= MAX_PAGINAS_POR_ETAPA: 
-                logger.info(f"Processando pág {pag_ped} pedidos...")
-                peds_pag, total_pags_ped, pag_commit_ped = search_pedidos_v2(db_conn, filtro_ped_data_inicial_api, filtro_ped_data_final_api, pag_ped)
-                if peds_pag is None: logger.error(f"Falha crítica (API) pág {pag_ped} pedidos. Interrompendo."); etapa_peds_ok=False; break
-                if not pag_commit_ped and peds_pag: logger.warning(f"Pág {pag_ped} pedidos não commitada. Interrompendo."); etapa_peds_ok=False; break
-                if peds_pag: total_peds_listados_etapa += len(peds_pag)
-                if total_pags_ped == 0 or pag_ped >= total_pags_ped: logger.info("Todas págs de pedidos processadas para o período/filtro atual."); break
-                pag_ped += 1
-                if pag_ped <= total_pags_ped: logger.info("Pausa (1s) antes da próxima pág de pedidos..."); time.sleep(1) 
+        data_inicio_filtro_dt = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=DIAS_PARA_BUSCA_PEDIDOS)
+        data_filtro_pedidos_api = data_inicio_filtro_dt.strftime("%d/%m/%Y %H:%M:%S")
+        
+        total_peds_listados_etapa, pag_ped = 0, 1
+        logger.info(f"Iniciando busca de pedidos alterados nos últimos {DIAS_PARA_BUSCA_PEDIDOS} dias (desde {data_filtro_pedidos_api}).")
+        
+        while pag_ped <= MAX_PAGINAS_POR_ETAPA: 
+            logger.info(f"Processando pág {pag_ped} de pedidos...")
+            peds_pag, total_pags_ped, pag_commit_ped = search_pedidos_v2(
+                db_conn, 
+                data_alteracao_inicial=data_filtro_pedidos_api, 
+                pagina=pag_ped
+            )
+            if peds_pag is None: logger.error(f"Falha crítica (API) pág {pag_ped} pedidos. Interrompendo."); etapa_peds_ok=False; break
+            if not pag_commit_ped and peds_pag: logger.warning(f"Pág {pag_ped} pedidos não commitada. Interrompendo."); etapa_peds_ok=False; break
+            if peds_pag: total_peds_listados_etapa += len(peds_pag)
+            if total_pags_ped == 0 or pag_ped >= total_pags_ped: logger.info("Todas págs de pedidos processadas para o período/filtro atual."); break
+            pag_ped += 1
+            if pag_ped <= total_pags_ped: logger.info("Pausa (1s) antes da próxima pág de pedidos..."); time.sleep(1) 
         
         if etapa_peds_ok: 
-            set_ultima_execucao(db_conn,PROCESSO_PEDIDOS,timestamp_para_set_ultima_exec)
-            msg_conc = f"Lote Pedidos ({DATA_LOTE_PEDIDOS_INICIO_STR}-{DATA_LOTE_PEDIDOS_FIM_STR})" if MODO_LOTE_PEDIDOS else "Passo 4 (Pedidos) incremental"
-            logger.info(f"{msg_conc} concluído. {total_peds_listados_etapa} pedidos listados pela API. Timestamp OK.")
+            # Ainda salvamos o timestamp para fins de auditoria, para saber quando o processo rodou pela última vez.
+            set_ultima_execucao(db_conn, PROCESSO_PEDIDOS, ts_inicio_ped)
+            logger.info(f"Passo 4 (Pedidos) concluído. {total_peds_listados_etapa} pedidos listados. Timestamp de auditoria atualizado.")
         else: 
-            logger.warning("Passo 4 (Pedidos) com erros. Timestamp NÃO OK.")
+            logger.warning("Passo 4 (Pedidos) com erros. Timestamp de auditoria NÃO atualizado.")
         logger.info("-" * 70)
 
         logger.info("--- Contagem final dos registros no banco de dados ---")
@@ -634,7 +583,7 @@ if __name__ == "__main__":
                 tabelas = ["categorias","produtos","produto_categorias","produto_estoque_total","produto_estoque_depositos","pedidos","pedido_itens","script_ultima_execucao"]
                 for t in tabelas:
                     try: cur.execute(sql.SQL("SELECT COUNT(*) FROM {}").format(sql.Identifier(t))); logger.info(f"  - Tabela '{t}': {cur.fetchone()[0]} regs.")
-                    except Exception as e: logger.error(f"  Erro ao contar '{t}': {e}",True)
+                    except Exception as e: logger.error(f"  Erro ao contar '{t}': {e}", exc_info=True)
         else: logger.warning("Não foi possível contar registros, DB fechado/indisponível.")
             
     except KeyboardInterrupt:
