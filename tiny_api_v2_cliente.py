@@ -47,7 +47,7 @@ PROCESSO_PEDIDOS = "pedidos"
 DEFAULT_API_TIMEOUT = 90
 RETRY_DELAY_429 = 30 
 DIAS_JANELA_SEGURANCA = 60
-MAX_PAGINAS_POR_ETAPA = 500
+MAX_PAGINAS_POR_ETAPA = 10000  # Aumentado para permitir processar todas as páginas
 
 def safe_float_convert(value_str, default=0.0):
     if value_str is None: return default
@@ -429,8 +429,9 @@ def search_produtos_v2_com_controle(conn, data_filtro_api):
     
     pagina_atual = pagina_inicial
     total_produtos_salvos = 0
+    total_paginas_api = None
     
-    while pagina_atual <= MAX_PAGINAS_POR_ETAPA:
+    while True:  # Loop infinito, controlado pelas condições internas
         logger.info(f"📄 Processando página {pagina_atual} de produtos...")
         
         params = {
@@ -453,7 +454,7 @@ def search_produtos_v2_com_controle(conn, data_filtro_api):
             break
         
         produtos = retorno["produtos"]
-        total_paginas = int(retorno.get("numero_paginas", 1))
+        total_paginas_api = int(retorno.get("numero_paginas", 1))
         
         # Processar produtos da página
         produtos_salvos_pagina = 0
@@ -464,14 +465,20 @@ def search_produtos_v2_com_controle(conn, data_filtro_api):
         total_produtos_salvos += produtos_salvos_pagina
         
         # Atualizar progresso
-        atualizar_progresso_pagina(conn, PROCESSO_PRODUTOS, pagina_atual, total_paginas, produtos_salvos_pagina)
+        atualizar_progresso_pagina(conn, PROCESSO_PRODUTOS, pagina_atual, total_paginas_api, produtos_salvos_pagina)
         
         logger.info(f"✅ Página {pagina_atual} CONCLUÍDA: {produtos_salvos_pagina} produtos salvos")
         
         # Verificar se chegou na última página
-        if pagina_atual >= total_paginas:
+        if pagina_atual >= total_paginas_api:
             logger.info(f"🏁 TODAS as páginas processadas! Total: {total_produtos_salvos} produtos")
             finalizar_progresso(conn, PROCESSO_PRODUTOS, "CONCLUIDO")
+            break
+        
+        # Verificar limite de segurança para evitar loops infinitos
+        if pagina_atual > MAX_PAGINAS_POR_ETAPA:
+            logger.warning(f"⚠️ LIMITE DE SEGURANÇA atingido na página {pagina_atual}. Pausando para próxima execução.")
+            finalizar_progresso(conn, PROCESSO_PRODUTOS, "EM_ANDAMENTO", f"Pausado na página {pagina_atual}")
             break
         
         pagina_atual += 1
@@ -672,8 +679,9 @@ def search_pedidos_v2_com_controle(conn, data_filtro_api):
     
     pagina_atual = pagina_inicial
     total_pedidos_salvos = 0
+    total_paginas_api = None
     
-    while pagina_atual <= MAX_PAGINAS_POR_ETAPA:
+    while True:  # Loop infinito, controlado pelas condições internas
         logger.info(f"📄 Processando página {pagina_atual} de pedidos...")
         
         params = {
@@ -696,7 +704,7 @@ def search_pedidos_v2_com_controle(conn, data_filtro_api):
             break
         
         pedidos = retorno["pedidos"]
-        total_paginas = int(retorno.get("numero_paginas", 1))
+        total_paginas_api = int(retorno.get("numero_paginas", 1))
         
         # Processar pedidos da página
         pedidos_salvos_pagina = 0
@@ -707,14 +715,20 @@ def search_pedidos_v2_com_controle(conn, data_filtro_api):
         total_pedidos_salvos += pedidos_salvos_pagina
         
         # Atualizar progresso
-        atualizar_progresso_pagina(conn, PROCESSO_PEDIDOS, pagina_atual, total_paginas, pedidos_salvos_pagina)
+        atualizar_progresso_pagina(conn, PROCESSO_PEDIDOS, pagina_atual, total_paginas_api, pedidos_salvos_pagina)
         
         logger.info(f"✅ Página {pagina_atual} CONCLUÍDA: {pedidos_salvos_pagina} pedidos salvos")
         
         # Verificar se chegou na última página
-        if pagina_atual >= total_paginas:
+        if pagina_atual >= total_paginas_api:
             logger.info(f"🏁 TODAS as páginas processadas! Total: {total_pedidos_salvos} pedidos")
             finalizar_progresso(conn, PROCESSO_PEDIDOS, "CONCLUIDO")
+            break
+        
+        # Verificar limite de segurança para evitar loops infinitos
+        if pagina_atual > MAX_PAGINAS_POR_ETAPA:
+            logger.warning(f"⚠️ LIMITE DE SEGURANÇA atingido na página {pagina_atual}. Pausando para próxima execução.")
+            finalizar_progresso(conn, PROCESSO_PEDIDOS, "EM_ANDAMENTO", f"Pausado na página {pagina_atual}")
             break
         
         pagina_atual += 1
