@@ -46,8 +46,8 @@ PROCESSO_PEDIDOS = "pedidos"
 # --- CONFIGURAÇÕES GERAIS DE EXECUÇÃO ---
 DEFAULT_API_TIMEOUT = 90
 RETRY_DELAY_429 = 30 
-DIAS_JANELA_SEGURANCA = 60
-MAX_PAGINAS_POR_ETAPA = 500 # Limite seguro para execução diária, conforme recomendação
+DIAS_JANELA_SEGURANCA = 60  # Janela unificada para produtos e pedidos
+MAX_PAGINAS_POR_ETAPA = 500  # Limite seguro para execução diária
 
 def safe_float_convert(value_str, default=0.0):
     if value_str is None: return default
@@ -174,8 +174,6 @@ def determinar_data_filtro_inteligente(conn, processo_nome, dias_janela_seguranc
     data_limite_dt = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=dias_janela_seguranca)
     return data_limite_dt.strftime("%d/%m/%Y %H:%M:%S")
 
-
-# --- Funções de Salvamento, API, e Lógica de Negócio (demais funções) ---
 def salvar_categoria_db(conn, categoria_dict, id_pai=None):
     cat_id_str = categoria_dict.get("id"); cat_desc = categoria_dict.get("descricao")
     if cat_id_str and cat_desc: 
@@ -398,7 +396,6 @@ def get_categorias_v2(conn):
     return False
 
 def get_produto_detalhes_v2(id_produto_tiny):
-    """Busca os detalhes de um produto específico, incluindo suas categorias."""
     logger.debug(f"Buscando detalhes produto ID {id_produto_tiny}...")
     ret, suc = make_api_v2_request(ENDPOINT_PRODUTO_OBTER, payload_dict={"id": id_produto_tiny})
     if suc and ret and isinstance(ret.get("produto"), dict): return ret["produto"]
@@ -406,7 +403,6 @@ def get_produto_detalhes_v2(id_produto_tiny):
     return None
 
 def search_produtos_v2(conn, data_alteracao_inicial=None, pagina=1):
-    """Busca produtos (cadastrais e categorias) e os salva. Retorna (lista_api, num_pags, sucesso_db_pag)."""
     logger.info(f"Buscando pág {pagina} de produtos desde {data_alteracao_inicial or 'inicio'}.")
     params = {"pagina": pagina}; 
     if data_alteracao_inicial: params["dataAlteracaoInicial"] = data_alteracao_inicial
@@ -438,7 +434,6 @@ def search_produtos_v2(conn, data_alteracao_inicial=None, pagina=1):
     return [], num_pags_tot, True
 
 def processar_atualizacoes_estoque_v2(conn, data_alteracao_estoque_inicial=None, pagina=1):
-    """Busca atualizações de estoque e salva. Retorna (lista_api, num_pags, sucesso_db_pag)."""
     logger.info(f"Buscando pág {pagina} de estoques desde {data_alteracao_estoque_inicial or 'inicio'}.")
     params_api = {"pagina": pagina}; 
     if data_alteracao_estoque_inicial: params_api["dataAlteracao"] = data_alteracao_estoque_inicial
@@ -474,7 +469,6 @@ def processar_atualizacoes_estoque_v2(conn, data_alteracao_estoque_inicial=None,
     return [], num_pags, True
 
 def get_detalhes_pedido_v2(id_pedido_api):
-    """Busca os detalhes de um pedido específico, incluindo seus itens."""
     logger.debug(f"Buscando detalhes pedido ID {id_pedido_api}...")
     ret, suc = make_api_v2_request(ENDPOINT_PEDIDO_OBTER, payload_dict={"id":id_pedido_api})
     if suc and ret and isinstance(ret.get("pedido"),dict): return ret["pedido"]
@@ -482,7 +476,6 @@ def get_detalhes_pedido_v2(id_pedido_api):
     return None
 
 def search_pedidos_v2(conn, data_alteracao_inicial=None, pagina=1):
-    """Busca pedidos por DATA DE ALTERAÇÃO e os salva. Retorna (lista_api, num_pags, sucesso_db_pag)."""
     params_api={"pagina":pagina}; 
     if data_alteracao_inicial: 
         params_api["dataAlteracaoInicial"]=data_alteracao_inicial
@@ -523,7 +516,6 @@ def search_pedidos_v2(conn, data_alteracao_inicial=None, pagina=1):
     logger.info(f"Nenhum pedido API para pág {pagina} {log_msg} ou estrutura inválida.")
     return [],num_pags,True
 
-
 # --- Bloco Principal de Execução ---
 if __name__ == "__main__":
     logger.info("=== Iniciando Cliente API v2 Tiny ERP - MODO PRODUÇÃO (Lógica Híbrida) ===")
@@ -542,17 +534,17 @@ if __name__ == "__main__":
     try:
         criar_tabelas_db(db_conn)
         
-        # PASSO 1: Categorias
+        # PASSO 1: Categorias (Carga completa)
         logger.info("--- PASSO 1: Categorias ---")
         if get_categorias_v2(db_conn): logger.info("Passo 1 (Categorias) concluído.")
         else: logger.warning("Passo 1 (Categorias) com falhas.")
         logger.info("-" * 70)
         
-        # PASSO 2: Produtos (Híbrido: Incremental com Janela de Segurança de 60 dias)
+        # PASSO 2: Produtos (Híbrido: Incremental com Janela de Segurança)
         logger.info("--- PASSO 2: Produtos (Cadastrais e Categorias) ---")
         ts_inicio_prod = datetime.datetime.now(datetime.timezone.utc)
         etapa_prod_ok = True
-        data_filtro_prod_api = determinar_data_filtro_inteligente(db_conn, PROCESSO_PRODUTOS, DIAS_JANELA_SEGURANCA_PRODUTOS)
+        data_filtro_prod_api = determinar_data_filtro_inteligente(db_conn, PROCESSO_PRODUTOS, DIAS_JANELA_SEGURANCA)
         
         if data_filtro_prod_api:
             total_prods_listados, pag_prod = 0, 1
@@ -563,12 +555,11 @@ if __name__ == "__main__":
                 if prods_pag is None: logger.error(f"Falha crítica (API) pág {pag_prod} produtos. Interrompendo."); etapa_prod_ok=False; break 
                 if not pag_commit and prods_pag: logger.warning(f"Pág {pag_prod} produtos não commitada. Interrompendo."); etapa_prod_ok=False; break
                 if prods_pag: total_prods_listados += len(prods_pag) 
-                if total_pags == 0 or pag_prod >= total_pags: logger.info("Todas págs produtos (cadastrais) processadas."); break
+                if total_pags == 0 or pag_prod >= total_pags: logger.info("Todas págs produtos processadas."); break
                 pag_prod += 1; time.sleep(1)
         else:
-            logger.error("Não foi possível determinar uma data de filtro para o processo de produtos.")
-            etapa_prod_ok = False
-        
+            logger.error("Não foi possível determinar data de filtro para produtos."); etapa_prod_ok=False
+
         if etapa_prod_ok: set_ultima_execucao(db_conn, PROCESSO_PRODUTOS, ts_inicio_prod)
         else: logger.warning("Passo 2 (Produtos) com erros. Timestamp de auditoria NÃO atualizado.")
         logger.info("-" * 70)
@@ -582,7 +573,7 @@ if __name__ == "__main__":
         total_est_listados, pag_est = 0, 1
         logger.info(f"Buscando atualizações de estoque nos últimos 29 dias (desde {filtro_est_api}).")
         while pag_est <= MAX_PAGINAS_POR_ETAPA:
-            logger.info(f"Processando pág {pag_est} atualizações estoque...")
+            logger.info(f"Processando pág {pag_est} de atualizações de estoque...")
             est_pag, total_pags_est, pag_commit_est = processar_atualizacoes_estoque_v2(db_conn,filtro_est_api,pag_est)
             if est_pag is None: logger.error(f"Falha crítica (API) pág {pag_est} estoques. Interrompendo."); etapa_est_ok=False; break
             if not pag_commit_est and est_pag: logger.warning(f"Pág {pag_est} estoques não commitada. Interrompendo."); etapa_est_ok=False; break
@@ -597,16 +588,20 @@ if __name__ == "__main__":
         # PASSO 4: Pedidos (Híbrido: Incremental com Janela de Segurança de 60 dias)
         logger.info("--- PASSO 4: Pedidos e Itens ---")
         ts_inicio_ped = datetime.datetime.now(datetime.timezone.utc)
-        data_filtro_pedidos_api = determinar_data_filtro_inteligente(db_conn, PROCESSO_PEDIDOS, DIAS_JANELA_SEGURANCA_PEDIDOS)
         etapa_peds_ok = True
-        
+        data_filtro_pedidos_api = determinar_data_filtro_inteligente(db_conn, PROCESSO_PEDIDOS, DIAS_JANELA_SEGURANCA)
+
         if data_filtro_pedidos_api:
             total_peds_listados_etapa, pag_ped = 0, 1
             logger.info(f"Iniciando busca de pedidos alterados desde: {data_filtro_pedidos_api}.")
             
             while pag_ped <= MAX_PAGINAS_POR_ETAPA: 
                 logger.info(f"Processando pág {pag_ped} de pedidos...")
-                peds_pag, total_pags_ped, pag_commit_ped = search_pedidos_v2(db_conn, data_filtro_pedidos_api, pag_ped)
+                peds_pag, total_pags_ped, pag_commit_ped = search_pedidos_v2(
+                    db_conn, 
+                    data_alteracao_inicial=data_filtro_pedidos_api, 
+                    pagina=pag_ped
+                )
                 if peds_pag is None: logger.error(f"Falha crítica (API) pág {pag_ped} pedidos. Interrompendo."); etapa_peds_ok=False; break
                 if not pag_commit_ped and peds_pag: logger.warning(f"Pág {pag_ped} pedidos não commitada. Interrompendo."); etapa_peds_ok=False; break
                 if peds_pag: total_peds_listados_etapa += len(peds_pag)
@@ -623,6 +618,7 @@ if __name__ == "__main__":
             logger.warning("Passo 4 (Pedidos) com erros. Timestamp de auditoria NÃO atualizado.")
         logger.info("-" * 70)
 
+        # Contagem Final
         logger.info("--- Contagem final dos registros no banco de dados ---")
         if db_conn and not db_conn.closed:
             with db_conn.cursor() as cur:
@@ -649,3 +645,4 @@ if __name__ == "__main__":
         else: logger.info("Conexão DB já estava fechada.")
 
     logger.info(f"=== Processo Concluído em {time.time() - start_time_total:.2f} segundos ===")
+
