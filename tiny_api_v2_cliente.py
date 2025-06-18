@@ -44,13 +44,11 @@ PROCESSO_ESTOQUES = "estoques"
 PROCESSO_PEDIDOS = "pedidos"
 
 # --- CONFIGURAÇÕES GERAIS DE EXECUÇÃO ---
-DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL = "01/10/2024 00:00:00" # Usado para Produtos na primeira vez
 DEFAULT_API_TIMEOUT = 90
 RETRY_DELAY_429 = 30 
-DIAS_PARA_BUSCA_PEDIDOS = 60 # Janela de busca de alterações para pedidos
-MAX_PAGINAS_POR_ETAPA = 999999 # Limite efetivamente desativado para produção normal
+DIAS_JANELA_SEGURANCA = 60
+MAX_PAGINAS_POR_ETAPA = 500 # Limite seguro para execução diária, conforme recomendação
 
-# --- Função Auxiliar para Conversão ---
 def safe_float_convert(value_str, default=0.0):
     if value_str is None: return default
     value_str = str(value_str).strip().replace(',', '.')
@@ -60,7 +58,6 @@ def safe_float_convert(value_str, default=0.0):
         logger.debug(f"Não foi possível converter '{value_str}' para float, usando {default}.")
         return default
 
-# --- Funções de Banco de Dados (PostgreSQL) ---
 def get_db_connection(max_retries=3, retry_delay=10):
     conn = None; attempt = 0
     while attempt < max_retries:
@@ -104,7 +101,7 @@ def get_ultima_execucao(conn, nome_processo):
         with conn.cursor() as cur:
             cur.execute("SELECT timestamp_ultima_execucao FROM script_ultima_execucao WHERE nome_processo = %s", (nome_processo,))
             r = cur.fetchone()
-            if r and r[0]: return (r[0] + datetime.timedelta(seconds=1)).strftime("%d/%m/%Y %H:%M:%S")
+            if r and r[0]: return (r[0] + datetime.timedelta(seconds=1))
     except Exception as e: logger.error(f"Erro ao buscar última execução para '{nome_processo}': {e}", exc_info=True)
     return None
 
@@ -115,12 +112,70 @@ def set_ultima_execucao(conn, nome_processo, timestamp=None):
             cur.execute("""INSERT INTO script_ultima_execucao (nome_processo, timestamp_ultima_execucao) VALUES (%s, %s)
                            ON CONFLICT (nome_processo) DO UPDATE SET timestamp_ultima_execucao = EXCLUDED.timestamp_ultima_execucao;""", (nome_processo, ts))
         if conn and not conn.closed: conn.commit()
-        ts_log = ts.strftime('%d/%m/%Y %H:%M:%S %Z') if isinstance(ts, datetime.datetime) else str(ts)
+        ts_log = ts.strftime('%d/%m/%Y %H:%M:%S %Z')
         logger.info(f"Timestamp para '{nome_processo}' definido: {ts_log}.")
     except Exception as e:
         logger.error(f"Erro ao definir última execução para '{nome_processo}': {e}", exc_info=True)
         if conn and not conn.closed: conn.rollback()
 
+def get_data_mais_recente(conn, tabela, campo_data):
+    """Obtém a data mais recente de uma tabela, validando o formato."""
+    query = sql.SQL("SELECT MAX({}) FROM {} WHERE {} ~ %s").format(
+        sql.Identifier(campo_data), sql.Identifier(tabela), sql.Identifier(campo_data)
+    )
+    pattern = r'^\d{2}/\d{2}/\d{4}$' # Regex para dd/mm/yyyy
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query, (pattern,))
+            result = cur.fetchone()
+            if result and result[0]:
+                logger.info(f"Data mais recente encontrada em '{tabela}': {result[0]}")
+                return result[0]
+    except Exception as e:
+        logger.error(f"Erro ao buscar data mais recente de '{tabela}': {e}", exc_info=True)
+    return None
+
+def criar_timestamp_sintetico(conn, processo, data_recente_str):
+    """Cria e salva um timestamp sintético baseado na data mais recente do banco."""
+    try:
+        dt_recente = datetime.datetime.strptime(data_recente_str, "%d/%m/%Y")
+        dt_sintetico = dt_recente.replace(hour=0, minute=0, second=0) + datetime.timedelta(days=1)
+        dt_sintetico_utc = dt_sintetico.replace(tzinfo=datetime.timezone.utc)
+        
+        logger.warning(f"Nenhum timestamp encontrado para '{processo}', mas dados existentes foram detectados.")
+        logger.warning(f"Criando e salvando timestamp 'sintético' para iniciar a busca a partir de {dt_sintetico.strftime('%d/%m/%Y %H:%M:%S')}.")
+        
+        set_ultima_execucao(conn, processo, dt_sintetico_utc)
+        return dt_sintetico # Retorna objeto datetime
+    except Exception as e:
+        logger.error(f"Erro ao criar timestamp sintético para '{processo}': {e}", exc_info=True)
+    return None
+
+def determinar_data_filtro_inteligente(conn, processo_nome, dias_janela_seguranca):
+    """Determina a data de filtro: usa timestamp, ou cria um sintético, ou usa janela de segurança."""
+    ultima_exec_dt = get_ultima_execucao(conn, processo_nome)
+    if ultima_exec_dt:
+        logger.info(f"Timestamp encontrado para '{processo_nome}'. Busca incremental desde {ultima_exec_dt.strftime('%d/%m/%Y %H:%M:%S')}.")
+        return ultima_exec_dt.strftime("%d/%m/%Y %H:%M:%S")
+
+    logger.warning(f"Nenhum timestamp encontrado para '{processo_nome}'. Verificando dados existentes...")
+    data_recente_str = None
+    if processo_nome == PROCESSO_PRODUTOS:
+        data_recente_str = get_data_mais_recente(conn, 'produtos', 'data_criacao_produto')
+    elif processo_nome == PROCESSO_PEDIDOS:
+        data_recente_str = get_data_mais_recente(conn, 'pedidos', 'data_pedido')
+
+    if data_recente_str:
+        ts_sintetico = criar_timestamp_sintetico(conn, processo_nome, data_recente_str)
+        if ts_sintetico:
+            return ts_sintetico.strftime("%d/%m/%Y %H:%M:%S")
+
+    logger.info(f"Nenhum dado existente para '{processo_nome}'. Usando janela de segurança de {dias_janela_seguranca} dias.")
+    data_limite_dt = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=dias_janela_seguranca)
+    return data_limite_dt.strftime("%d/%m/%Y %H:%M:%S")
+
+
+# --- Funções de Salvamento, API, e Lógica de Negócio (demais funções) ---
 def salvar_categoria_db(conn, categoria_dict, id_pai=None):
     cat_id_str = categoria_dict.get("id"); cat_desc = categoria_dict.get("descricao")
     if cat_id_str and cat_desc: 
@@ -471,7 +526,7 @@ def search_pedidos_v2(conn, data_alteracao_inicial=None, pagina=1):
 
 # --- Bloco Principal de Execução ---
 if __name__ == "__main__":
-    logger.info("=== Iniciando Cliente API v2 Tiny ERP - MODO PRODUÇÃO ===")
+    logger.info("=== Iniciando Cliente API v2 Tiny ERP - MODO PRODUÇÃO (Lógica Híbrida) ===")
     start_time_total = time.time()
 
     required_vars = {"TINY_API_V2_TOKEN": API_V2_TOKEN, "DB_HOST": DB_HOST, "DB_NAME": DB_NAME, "DB_USER": DB_USER, "DB_PASSWORD": DB_PASSWORD}
@@ -493,44 +548,39 @@ if __name__ == "__main__":
         else: logger.warning("Passo 1 (Categorias) com falhas.")
         logger.info("-" * 70)
         
-        # PASSO 2: Produtos Cadastrais e Categorias (Incremental com timestamp)
+        # PASSO 2: Produtos (Híbrido: Incremental com Janela de Segurança de 60 dias)
         logger.info("--- PASSO 2: Produtos (Cadastrais e Categorias) ---")
-        ultima_exec_prod_str = get_ultima_execucao(db_conn, PROCESSO_PRODUTOS)
-        data_filtro_prod = ultima_exec_prod_str if ultima_exec_prod_str else DATA_INICIAL_PRIMEIRA_CARGA_INCREMENTAL
-        total_prods_listados, pag_prod, ts_inicio_prod, etapa_prod_ok = 0,1,datetime.datetime.now(datetime.timezone.utc),True
-        logger.info(f"Buscando produtos (cadastrais) desde: {data_filtro_prod}.")
-        while pag_prod <= MAX_PAGINAS_POR_ETAPA: 
-            logger.info(f"Processando pág {pag_prod} produtos (cadastrais)...")
-            prods_pag, total_pags, pag_commit = search_produtos_v2(db_conn, data_filtro_prod, pag_prod)
-            if prods_pag is None: logger.error(f"Falha crítica (API) pág {pag_prod} produtos. Interrompendo."); etapa_prod_ok=False; break 
-            if not pag_commit and prods_pag: logger.warning(f"Pág {pag_prod} produtos não commitada. Interrompendo."); etapa_prod_ok=False; break
-            if prods_pag: total_prods_listados += len(prods_pag) 
-            if total_pags == 0 or pag_prod >= total_pags: logger.info("Todas págs produtos (cadastrais) processadas."); break
-            pag_prod += 1
-            if pag_prod <= total_pags: logger.info("Pausa (1s) próx pág produtos..."); time.sleep(1) 
-        if etapa_prod_ok: set_ultima_execucao(db_conn, PROCESSO_PRODUTOS, ts_inicio_prod); logger.info(f"Passo 2 (Produtos) concluído. {total_prods_listados} produtos listados. Timestamp OK.")
-        else: logger.warning("Passo 2 (Produtos) com erros. Timestamp NÃO OK.")
+        ts_inicio_prod = datetime.datetime.now(datetime.timezone.utc)
+        etapa_prod_ok = True
+        data_filtro_prod_api = determinar_data_filtro_inteligente(db_conn, PROCESSO_PRODUTOS, DIAS_JANELA_SEGURANCA_PRODUTOS)
+        
+        if data_filtro_prod_api:
+            total_prods_listados, pag_prod = 0, 1
+            logger.info(f"Iniciando busca de produtos (cadastrais) desde: {data_filtro_prod_api}.")
+            while pag_prod <= MAX_PAGINAS_POR_ETAPA: 
+                logger.info(f"Processando pág {pag_prod} de produtos...")
+                prods_pag, total_pags, pag_commit = search_produtos_v2(db_conn, data_filtro_prod_api, pag_prod)
+                if prods_pag is None: logger.error(f"Falha crítica (API) pág {pag_prod} produtos. Interrompendo."); etapa_prod_ok=False; break 
+                if not pag_commit and prods_pag: logger.warning(f"Pág {pag_prod} produtos não commitada. Interrompendo."); etapa_prod_ok=False; break
+                if prods_pag: total_prods_listados += len(prods_pag) 
+                if total_pags == 0 or pag_prod >= total_pags: logger.info("Todas págs produtos (cadastrais) processadas."); break
+                pag_prod += 1; time.sleep(1)
+        else:
+            logger.error("Não foi possível determinar uma data de filtro para o processo de produtos.")
+            etapa_prod_ok = False
+        
+        if etapa_prod_ok: set_ultima_execucao(db_conn, PROCESSO_PRODUTOS, ts_inicio_prod)
+        else: logger.warning("Passo 2 (Produtos) com erros. Timestamp de auditoria NÃO atualizado.")
         logger.info("-" * 70)
         
-        # PASSO 3: Atualizações de Estoque (Janela de ~29 dias da API)
+        # PASSO 3: Estoques (Janela de ~29 dias da API)
         logger.info("--- PASSO 3: Atualizações de Estoque ---")
-        ultima_exec_est_str = get_ultima_execucao(db_conn, PROCESSO_ESTOQUES); filtro_est_api = None
-        hoje = datetime.datetime.now(datetime.timezone.utc); dias_lim = 29; data_lim_api_dt = hoje - datetime.timedelta(days=dias_lim)
-        if ultima_exec_est_str:
-            try:
-                ult_exec_obj_naive = datetime.datetime.strptime(ultima_exec_est_str, "%d/%m/%Y %H:%M:%S")
-                ult_exec_obj_utc = ult_exec_obj_naive.replace(tzinfo=datetime.timezone.utc)
-                if ult_exec_obj_utc < data_lim_api_dt: 
-                    logger.warning(f"Última sync de estoque ({ultima_exec_est_str}) > {dias_lim} dias. Ajustando filtro para últimos {dias_lim} dias ({data_lim_api_dt.strftime('%d/%m/%Y %H:%M:%S %Z')}).")
-                    filtro_est_api = data_lim_api_dt.strftime("%d/%m/%Y %H:%M:%S")
-                else: filtro_est_api = ultima_exec_est_str
-            except ValueError: 
-                logger.error(f"Data inválida para ultima_exec_estoques: {ultima_exec_est_str}. Usando filtro de {dias_lim} dias."); filtro_est_api = data_lim_api_dt.strftime("%d/%m/%Y %H:%M:%S")
-        else: 
-            logger.info(f"Primeira execução de estoques. Busca limitada últimos {dias_lim} dias ({data_lim_api_dt.strftime('%d/%m/%Y %H:%M:%S %Z')}).")
-            filtro_est_api = data_lim_api_dt.strftime("%d/%m/%Y %H:%M:%S")
-        total_est_listados, pag_est, ts_inicio_est, etapa_est_ok = 0,1,datetime.datetime.now(datetime.timezone.utc),True
-        logger.info(f"Buscando atualizações estoque desde: {filtro_est_api}.")
+        ts_inicio_est = datetime.datetime.now(datetime.timezone.utc)
+        etapa_est_ok = True
+        filtro_est_api = (ts_inicio_est - datetime.timedelta(days=29)).strftime("%d/%m/%Y %H:%M:%S")
+        
+        total_est_listados, pag_est = 0, 1
+        logger.info(f"Buscando atualizações de estoque nos últimos 29 dias (desde {filtro_est_api}).")
         while pag_est <= MAX_PAGINAS_POR_ETAPA:
             logger.info(f"Processando pág {pag_est} atualizações estoque...")
             est_pag, total_pags_est, pag_commit_est = processar_atualizacoes_estoque_v2(db_conn,filtro_est_api,pag_est)
@@ -538,40 +588,36 @@ if __name__ == "__main__":
             if not pag_commit_est and est_pag: logger.warning(f"Pág {pag_est} estoques não commitada. Interrompendo."); etapa_est_ok=False; break
             if est_pag: total_est_listados += len(est_pag)
             if total_pags_est == 0 or pag_est >= total_pags_est: logger.info("Todas págs estoques processadas."); break
-            pag_est += 1
-            if pag_est <= total_pags_est: logger.info("Pausa (1s) próx pág estoques..."); time.sleep(1)
-        if etapa_est_ok: set_ultima_execucao(db_conn, PROCESSO_ESTOQUES, ts_inicio_est); logger.info(f"Passo 3 (Estoques) concluído. {total_est_listados} atualizações listadas. Timestamp OK.")
-        else: logger.warning("Passo 3 (Estoques) com erros. Timestamp NÃO OK.")
+            pag_est += 1; time.sleep(1)
+            
+        if etapa_est_ok: set_ultima_execucao(db_conn, PROCESSO_ESTOQUES, ts_inicio_est)
+        else: logger.warning("Passo 3 (Estoques) com erros. Timestamp de auditoria NÃO atualizado.")
         logger.info("-" * 70)
 
-        # PASSO 4: Pedidos (Janela Móvel de 60 dias)
-        logger.info("--- PASSO 4: Pedidos e Itens (Janela Móvel) ---")
+        # PASSO 4: Pedidos (Híbrido: Incremental com Janela de Segurança de 60 dias)
+        logger.info("--- PASSO 4: Pedidos e Itens ---")
         ts_inicio_ped = datetime.datetime.now(datetime.timezone.utc)
+        data_filtro_pedidos_api = determinar_data_filtro_inteligente(db_conn, PROCESSO_PEDIDOS, DIAS_JANELA_SEGURANCA_PEDIDOS)
         etapa_peds_ok = True
         
-        data_inicio_filtro_dt = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=DIAS_PARA_BUSCA_PEDIDOS)
-        data_filtro_pedidos_api = data_inicio_filtro_dt.strftime("%d/%m/%Y %H:%M:%S")
-        
-        total_peds_listados_etapa, pag_ped = 0, 1
-        logger.info(f"Iniciando busca de pedidos alterados nos últimos {DIAS_PARA_BUSCA_PEDIDOS} dias (desde {data_filtro_pedidos_api}).")
-        
-        while pag_ped <= MAX_PAGINAS_POR_ETAPA: 
-            logger.info(f"Processando pág {pag_ped} de pedidos...")
-            peds_pag, total_pags_ped, pag_commit_ped = search_pedidos_v2(
-                db_conn, 
-                data_alteracao_inicial=data_filtro_pedidos_api, 
-                pagina=pag_ped
-            )
-            if peds_pag is None: logger.error(f"Falha crítica (API) pág {pag_ped} pedidos. Interrompendo."); etapa_peds_ok=False; break
-            if not pag_commit_ped and peds_pag: logger.warning(f"Pág {pag_ped} pedidos não commitada. Interrompendo."); etapa_peds_ok=False; break
-            if peds_pag: total_peds_listados_etapa += len(peds_pag)
-            if total_pags_ped == 0 or pag_ped >= total_pags_ped: logger.info("Todas págs de pedidos processadas para o período/filtro atual."); break
-            pag_ped += 1
-            if pag_ped <= total_pags_ped: logger.info("Pausa (1s) antes da próxima pág de pedidos..."); time.sleep(1) 
+        if data_filtro_pedidos_api:
+            total_peds_listados_etapa, pag_ped = 0, 1
+            logger.info(f"Iniciando busca de pedidos alterados desde: {data_filtro_pedidos_api}.")
+            
+            while pag_ped <= MAX_PAGINAS_POR_ETAPA: 
+                logger.info(f"Processando pág {pag_ped} de pedidos...")
+                peds_pag, total_pags_ped, pag_commit_ped = search_pedidos_v2(db_conn, data_filtro_pedidos_api, pag_ped)
+                if peds_pag is None: logger.error(f"Falha crítica (API) pág {pag_ped} pedidos. Interrompendo."); etapa_peds_ok=False; break
+                if not pag_commit_ped and peds_pag: logger.warning(f"Pág {pag_ped} pedidos não commitada. Interrompendo."); etapa_peds_ok=False; break
+                if peds_pag: total_peds_listados_etapa += len(peds_pag)
+                if total_pags_ped == 0 or pag_ped >= total_pags_ped: logger.info("Todas págs de pedidos processadas para o período/filtro atual."); break
+                pag_ped += 1; time.sleep(1)
+        else:
+            logger.error("Não foi possível determinar uma data de filtro para o processo de pedidos.")
+            etapa_peds_ok = False
         
         if etapa_peds_ok: 
-            # Ainda salvamos o timestamp para fins de auditoria, para saber quando o processo rodou pela última vez.
-            set_ultima_execucao(db_conn, PROCESSO_PEDIDOS, ts_inicio_ped)
+            set_ultima_execucao(db_conn,PROCESSO_PEDIDOS,ts_inicio_ped)
             logger.info(f"Passo 4 (Pedidos) concluído. {total_peds_listados_etapa} pedidos listados. Timestamp de auditoria atualizado.")
         else: 
             logger.warning("Passo 4 (Pedidos) com erros. Timestamp de auditoria NÃO atualizado.")
@@ -583,7 +629,7 @@ if __name__ == "__main__":
                 tabelas = ["categorias","produtos","produto_categorias","produto_estoque_total","produto_estoque_depositos","pedidos","pedido_itens","script_ultima_execucao"]
                 for t in tabelas:
                     try: cur.execute(sql.SQL("SELECT COUNT(*) FROM {}").format(sql.Identifier(t))); logger.info(f"  - Tabela '{t}': {cur.fetchone()[0]} regs.")
-                    except Exception as e: logger.error(f"  Erro ao contar '{t}': {e}", exc_info=True)
+                    except Exception as e: logger.error(f"  Erro ao contar '{t}': {e}",True)
         else: logger.warning("Não foi possível contar registros, DB fechado/indisponível.")
             
     except KeyboardInterrupt:
