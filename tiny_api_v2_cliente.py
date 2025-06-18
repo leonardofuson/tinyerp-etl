@@ -303,155 +303,117 @@ def finalizar_progresso(conn, processo, status_final="CONCLUIDO", observacoes=No
                     WHERE processo = %s
                 """, (status_final, processo))
             conn.commit()
+            logger.info(f"✅ PROCESSO FINALIZADO: {processo} - Status: {status_final}")
             
-            if status_final == "CONCLUIDO":
-                logger.info(f"🏁 PROGRESSO FINALIZADO: {processo} - ✅ SUCESSO")
-            else:
-                logger.info(f"🏁 PROGRESSO FINALIZADO: {processo} - {status_final}")
-                
     except Exception as e:
         logger.error(f"Erro ao finalizar progresso: {e}")
 
-# ===== FUNÇÕES DE API E SALVAMENTO (mantidas iguais) =====
-def salvar_categoria_db(conn, categoria_dict, id_pai=None):
-    cat_id_str = categoria_dict.get("id"); cat_desc = categoria_dict.get("descricao")
-    if cat_id_str and cat_desc: 
+def make_api_v2_request(endpoint, params=None, max_retries=3):
+    """Faz requisição para API v2 com retry automático."""
+    if params is None: params = {}
+    params["token"] = API_V2_TOKEN
+    params["formato"] = "JSON"
+    
+    for attempt in range(max_retries):
         try:
-            cat_id = int(cat_id_str) 
-            with conn.cursor() as cur:
-                cur.execute("INSERT INTO categorias (id_categoria, descricao_categoria, id_categoria_pai) VALUES (%s, %s, %s) ON CONFLICT (id_categoria) DO UPDATE SET descricao_categoria = EXCLUDED.descricao_categoria, id_categoria_pai = EXCLUDED.id_categoria_pai;", (cat_id, cat_desc, id_pai))
-            if "nodes" in categoria_dict and isinstance(categoria_dict["nodes"], list):
-                for sub_cat in categoria_dict["nodes"]: salvar_categoria_db(conn, sub_cat, id_pai=cat_id) 
-        except ValueError: logger.warning(f"ID da categoria inválido '{cat_id_str}'. Categoria: {categoria_dict}", exc_info=False)
-        except Exception as e: logger.error(f"Erro PostgreSQL ao salvar categoria ID '{cat_id_str}': {e}", exc_info=True)
-
-def salvar_produto_db(conn, produto_api_data):
-    id_prod_str = str(produto_api_data.get("id","")).strip()
-    if not id_prod_str or not id_prod_str.isdigit(): raise ValueError(f"ID do produto inválido: {id_prod_str}")
-    id_prod = int(id_prod_str)
-    try:
-        dados = { "id_produto": id_prod, "nome_produto": produto_api_data.get("nome"), "codigo_produto": str(p_api_cod).strip() if (p_api_cod := produto_api_data.get("codigo")) and str(p_api_cod).strip() else None, "preco_produto": safe_float_convert(produto_api_data.get("preco")), "unidade_produto": produto_api_data.get("unidade"), "situacao_produto": produto_api_data.get("situacao"), "data_criacao_produto": produto_api_data.get("data_criacao"), "gtin_produto": produto_api_data.get("gtin"), "preco_promocional_produto": safe_float_convert(produto_api_data.get("preco_promocional")), "preco_custo_produto": safe_float_convert(produto_api_data.get("preco_custo")), "preco_custo_medio_produto": safe_float_convert(produto_api_data.get("preco_custo_medio")), "tipo_variacao_produto": produto_api_data.get("tipoVariacao") }
-        with conn.cursor() as cur:
-            if dados["codigo_produto"] is not None:
-                cur.execute("SELECT id_produto FROM produtos WHERE codigo_produto = %s AND id_produto != %s", (dados["codigo_produto"], id_prod))
-                if cur.fetchone(): logger.warning(f"SKU '{dados['codigo_produto']}' em uso. Produto ID {id_prod} terá SKU NULL."); dados["codigo_produto"] = None
-            cols = ", ".join(dados.keys()); vals_template = ", ".join(["%s"] * len(dados))
-            updates = ", ".join([f"{col} = EXCLUDED.{col}" for col in dados.keys() if col != "id_produto"])
-            query = f"INSERT INTO produtos ({cols}) VALUES ({vals_template}) ON CONFLICT (id_produto) DO UPDATE SET {updates};"
-            cur.execute(query, tuple(dados.values()))
-        logger.debug(f"Produto ID {id_prod} salvo/atualizado.")
-    except Exception as e: logger.error(f"Erro ao salvar produto ID '{id_prod_str}': {e}", exc_info=True); raise
-
-def salvar_produto_categorias_db(conn, id_produto, categorias_lista_api):
-    if not isinstance(id_produto, int): raise ValueError(f"ID do produto inválido: {id_produto}")
-    try:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM produto_categorias WHERE id_produto = %s", (id_produto,))
-            if categorias_lista_api and isinstance(categorias_lista_api, list):
-                dados = [(id_produto, int(c.get("id"))) for c in categorias_lista_api if isinstance(c,dict) and str(c.get("id","")).strip().isdigit()]
-                if dados: execute_values(cur, "INSERT INTO produto_categorias (id_produto, id_categoria) VALUES %s ON CONFLICT DO NOTHING", dados); logger.debug(f"{len(dados)} categorias salvas para produto ID {id_produto}.")
-    except Exception as e: logger.error(f"Erro ao salvar categorias do produto ID {id_produto}: {e}", exc_info=True); raise
-
-def salvar_produto_estoque_total_db(conn, id_produto, nome_produto, saldo_total_api, saldo_reservado_api, data_ultima_atualizacao_estoque=None):
-    id_p = int(id_produto)
-    try:
-        st = safe_float_convert(saldo_total_api); sr = safe_float_convert(saldo_reservado_api); dt_att = None
-        if data_ultima_atualizacao_estoque is None: dt_att = datetime.datetime.now(datetime.timezone.utc)
-        elif isinstance(data_ultima_atualizacao_estoque, str):
-            try: dt_att = datetime.datetime.strptime(data_ultima_atualizacao_estoque, "%d/%m/%Y %H:%M:%S").replace(tzinfo=datetime.timezone.utc)
-            except ValueError: dt_att = datetime.datetime.now(datetime.timezone.utc); logger.warning(f"Data de estoque inválida '{data_ultima_atualizacao_estoque}', usando atual.")
-        elif isinstance(data_ultima_atualizacao_estoque, datetime.datetime):
-            dt_att = data_ultima_atualizacao_estoque if data_ultima_atualizacao_estoque.tzinfo else data_ultima_atualizacao_estoque.replace(tzinfo=datetime.timezone.utc)
-        else: dt_att = datetime.datetime.now(datetime.timezone.utc); logger.warning(f"Tipo de data de estoque inesperado, usando atual.")
-        with conn.cursor() as cur:
-            cur.execute("""INSERT INTO produto_estoque_total (id_produto, nome_produto_estoque, saldo_total_api, saldo_reservado_api, data_ultima_atualizacao_api)
-                           VALUES (%s,%s,%s,%s,%s) ON CONFLICT (id_produto) DO UPDATE SET nome_produto_estoque=EXCLUDED.nome_produto_estoque,
-                           saldo_total_api=EXCLUDED.saldo_total_api, saldo_reservado_api=EXCLUDED.saldo_reservado_api, data_ultima_atualizacao_api=EXCLUDED.data_ultima_atualizacao_api;""",
-                        (id_p, nome_produto, st, sr, dt_att))
-        logger.debug(f"Estoque total salvo para produto ID {id_p}.")
-    except Exception as e: logger.error(f"Erro ao salvar estoque total do produto ID {id_p}: {e}", exc_info=True); raise
-
-def salvar_produto_estoque_depositos_db(conn, id_produto, depositos_lista_api):
-    id_p = int(id_produto)
-    try:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM produto_estoque_depositos WHERE id_produto = %s", (id_p,))
-            if depositos_lista_api and isinstance(depositos_lista_api, list):
-                dados = []
-                for dep in depositos_lista_api:
-                    if isinstance(dep, dict):
-                        nome_dep = dep.get("nome"); saldo_dep = safe_float_convert(dep.get("saldo"))
-                        desconsiderar = dep.get("desconsiderar"); empresa = dep.get("empresa")
-                        if nome_dep is not None: dados.append((id_p, nome_dep, saldo_dep, desconsiderar, empresa))
-                if dados: execute_values(cur, "INSERT INTO produto_estoque_depositos (id_produto, nome_deposito, saldo_deposito, desconsiderar_deposito, empresa_deposito) VALUES %s", dados); logger.debug(f"{len(dados)} depósitos salvos para produto ID {id_p}.")
-    except Exception as e: logger.error(f"Erro ao salvar depósitos do produto ID {id_p}: {e}", exc_info=True); raise
-
-def salvar_pedido_db(conn, pedido_api_data):
-    id_ped_str = str(pedido_api_data.get("id","")).strip()
-    if not id_ped_str or not id_ped_str.isdigit(): raise ValueError(f"ID do pedido inválido: {id_ped_str}")
-    id_ped = int(id_ped_str)
-    try:
-        dados = { "id_pedido": id_ped, "numero_pedido": pedido_api_data.get("numero"), "numero_ecommerce": pedido_api_data.get("numero_ecommerce"), "data_pedido": pedido_api_data.get("data_pedido"), "data_prevista": pedido_api_data.get("data_prevista"), "nome_cliente": pedido_api_data.get("nome_cliente"), "valor_pedido": safe_float_convert(pedido_api_data.get("valor_pedido")), "id_vendedor": int(pedido_api_data.get("id_vendedor")) if str(pedido_api_data.get("id_vendedor","")).strip().isdigit() else None, "nome_vendedor": pedido_api_data.get("nome_vendedor"), "situacao_pedido": pedido_api_data.get("situacao"), "codigo_rastreamento": pedido_api_data.get("codigo_rastreamento") }
-        with conn.cursor() as cur:
-            cols = ", ".join(dados.keys()); vals_template = ", ".join(["%s"] * len(dados))
-            updates = ", ".join([f"{col} = EXCLUDED.{col}" for col in dados.keys() if col != "id_pedido"])
-            query = f"INSERT INTO pedidos ({cols}) VALUES ({vals_template}) ON CONFLICT (id_pedido) DO UPDATE SET {updates};"
-            cur.execute(query, tuple(dados.values()))
-        logger.debug(f"Pedido ID {id_ped} salvo/atualizado.")
-    except Exception as e: logger.error(f"Erro ao salvar pedido ID '{id_ped_str}': {e}", exc_info=True); raise
-
-def salvar_pedido_itens_db(conn, id_pedido, itens_lista_api):
-    if not isinstance(id_pedido, int): raise ValueError(f"ID do pedido inválido: {id_pedido}")
-    try:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM pedido_itens WHERE id_pedido = %s", (id_pedido,))
-            if itens_lista_api and isinstance(itens_lista_api, list):
-                dados = []
-                for item in itens_lista_api:
-                    if isinstance(item, dict):
-                        id_prod_tiny = int(item.get("id_produto_tiny")) if str(item.get("id_produto_tiny","")).strip().isdigit() else None
-                        cod_prod = item.get("codigo_produto"); desc_prod = item.get("descricao_produto")
-                        qtd = safe_float_convert(item.get("quantidade")); unidade = item.get("unidade")
-                        val_unit = safe_float_convert(item.get("valor_unitario")); id_grade = item.get("id_grade")
-                        dados.append((id_pedido, id_prod_tiny, cod_prod, desc_prod, qtd, unidade, val_unit, id_grade))
-                if dados: execute_values(cur, "INSERT INTO pedido_itens (id_pedido, id_produto_tiny, codigo_produto_pedido, descricao_produto_pedido, quantidade, unidade_pedido, valor_unitario_pedido, id_grade_pedido) VALUES %s", dados); logger.debug(f"{len(dados)} itens salvos para pedido ID {id_pedido}.")
-    except Exception as e: logger.error(f"Erro ao salvar itens do pedido ID {id_pedido}: {e}", exc_info=True); raise
-
-def make_api_v2_request(endpoint, params=None, timeout=DEFAULT_API_TIMEOUT, max_retries=3):
-    url = BASE_URL_V2 + endpoint; params = params or {}; params["token"] = API_V2_TOKEN; params["formato"] = "json"
-    for attempt in range(1, max_retries + 1):
-        try:
-            logger.debug(f"Fazendo requisição para API (tentativa {attempt}): {endpoint}")
-            response = requests.post(url, data=params, timeout=timeout)
+            response = requests.post(f"{BASE_URL_V2}{endpoint}", data=params, timeout=DEFAULT_API_TIMEOUT)
+            
             if response.status_code == 429:
                 logger.warning(f"Rate limit atingido (429). Aguardando {RETRY_DELAY_429}s antes de tentar novamente...")
-                time.sleep(RETRY_DELAY_429); continue
-            response.raise_for_status(); data = response.json()
-            if data.get("status") == "Erro":
-                codigo_erro = data.get("codigo_erro", ""); msg_erro = data.get("erros", [{}])[0].get("erro", "Erro desconhecido") if data.get("erros") else "Erro desconhecido"
-                logger.error(f"API Tiny: Status 'Erro' (Endpoint: {endpoint}). Código: {codigo_erro}. Msg: {msg_erro}. Resp: {data}")
-                return None
-            return data
-        except requests.exceptions.Timeout: logger.warning(f"Timeout na requisição para {endpoint} (tentativa {attempt}). Tentando novamente...")
-        except requests.exceptions.RequestException as e: logger.error(f"Erro de requisição para {endpoint} (tentativa {attempt}): {e}")
-        except json.JSONDecodeError as e: logger.error(f"Erro ao decodificar JSON da resposta de {endpoint} (tentativa {attempt}): {e}")
-        except Exception as e: logger.error(f"Erro inesperado na requisição para {endpoint} (tentativa {attempt}): {e}", exc_info=True)
-        if attempt < max_retries: time.sleep(5)
-    logger.error(f"Falha definitiva na API após {max_retries} tentativas: {endpoint}"); return None
+                time.sleep(RETRY_DELAY_429)
+                continue
+            
+            response.raise_for_status()
+            return response.json()
+            
+        except requests.exceptions.Timeout:
+            logger.warning(f"Timeout na tentativa {attempt + 1}/{max_retries}")
+            if attempt < max_retries - 1:
+                time.sleep(5)
+                continue
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Erro na requisição (tentativa {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(5)
+                continue
+        except json.JSONDecodeError as e:
+            logger.error(f"Erro ao decodificar JSON: {e}")
+            return None
+    
+    logger.error(f"Falha após {max_retries} tentativas para {endpoint}")
+    return None
+
+def salvar_categoria_db(conn, categoria, id_pai=None):
+    """Salva categoria e suas subcategorias recursivamente."""
+    try:
+        id_categoria = int(categoria.get("id", 0))
+        descricao = categoria.get("descricao", "")
+        
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO categorias (id_categoria, descricao_categoria, id_categoria_pai)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (id_categoria) DO UPDATE SET
+                    descricao_categoria = EXCLUDED.descricao_categoria,
+                    id_categoria_pai = EXCLUDED.id_categoria_pai
+            """, (id_categoria, descricao, id_pai))
+        
+        # Processar subcategorias (nodes)
+        nodes = categoria.get("nodes", [])
+        if isinstance(nodes, list):
+            for subcategoria in nodes:
+                salvar_categoria_db(conn, subcategoria, id_categoria)
+                
+    except Exception as e:
+        logger.error(f"Erro ao salvar categoria {categoria}: {e}")
 
 def get_categorias_v2(conn):
+    """FUNÇÃO CORRIGIDA: Obtém categorias da API v2."""
     logger.info("Iniciando Categorias.")
     data = make_api_v2_request(ENDPOINT_CATEGORIAS)
-    if not data or "retorno" not in data: logger.error("Falha ao obter categorias da API."); return False
+    if not data or "retorno" not in data: 
+        logger.error("Falha ao obter categorias da API.")
+        return False
+    
     try:
-        categorias_arvore = data["retorno"].get("categorias", [])
-        if not isinstance(categorias_arvore, list): logger.warning("Estrutura de categorias inesperada."); return False
+        retorno = data["retorno"]
+        
+        # CORREÇÃO: Verificar se retorno é uma lista ou dicionário
+        if isinstance(retorno, list):
+            # Se retorno é uma lista, as categorias estão diretamente nela
+            categorias_arvore = retorno
+        elif isinstance(retorno, dict):
+            # Se retorno é um dicionário, verificar se tem campo "categorias"
+            if "categorias" in retorno:
+                categorias_arvore = retorno["categorias"]
+            else:
+                # Se não tem campo "categorias", pode ser que as categorias estejam no próprio retorno
+                logger.warning("Estrutura de retorno inesperada, tentando usar retorno diretamente")
+                categorias_arvore = [retorno] if retorno else []
+        else:
+            logger.error(f"Tipo de retorno inesperado: {type(retorno)}")
+            return False
+        
+        if not isinstance(categorias_arvore, list): 
+            logger.warning(f"Estrutura de categorias inesperada. Tipo: {type(categorias_arvore)}")
+            return False
+        
+        # Salvar categorias no banco
         with conn.cursor() as cur:
-            for cat_raiz in categorias_arvore: salvar_categoria_db(conn, cat_raiz)
-        if conn and not conn.closed: conn.commit()
-        logger.info(f"{len(categorias_arvore)} cats raiz commitadas.")
+            for cat_raiz in categorias_arvore: 
+                salvar_categoria_db(conn, cat_raiz)
+        
+        if conn and not conn.closed: 
+            conn.commit()
+        
+        logger.info(f"{len(categorias_arvore)} categorias raiz processadas e commitadas.")
         return True
-    except Exception as e: logger.error(f"Erro ao processar categorias: {e}", exc_info=True); return False
+        
+    except Exception as e: 
+        logger.error(f"Erro ao processar categorias: {e}", exc_info=True)
+        if conn and not conn.closed:
+            conn.rollback()
+        return False
 
 def search_produtos_v2_com_controle(conn, data_filtro_api):
     """Busca produtos com controle granular de progresso."""
@@ -466,70 +428,234 @@ def search_produtos_v2_com_controle(conn, data_filtro_api):
     logger.info(f"🚀 INICIANDO busca de produtos desde página {pagina_inicial}")
     
     pagina_atual = pagina_inicial
-    produtos_salvos_total = 0
+    total_produtos_salvos = 0
     
-    try:
-        while pagina_atual <= MAX_PAGINAS_POR_ETAPA:
-            logger.info(f"📄 Processando página {pagina_atual} de produtos...")
-            
-            params = {
-                "dataAlteracaoInicial": data_filtro_api,
-                "pagina": pagina_atual
-            }
-            
-            data = make_api_v2_request(ENDPOINT_PRODUTOS_PESQUISA, params)
-            if not data or "retorno" not in data:
-                logger.error(f"Falha API produtos pág {pagina_atual} por DATA DE ALTERAÇÃO desde {data_filtro_api}.")
-                finalizar_progresso(conn, PROCESSO_PRODUTOS, "ERRO", f"❌ Falha na API - página {pagina_atual}")
-                return False
-            
-            retorno = data["retorno"]
-            produtos_lista = retorno.get("produtos", [])
-            total_paginas = int(retorno.get("numero_paginas", 1))
-            
-            if not produtos_lista:
-                logger.info(f"Nenhum produto encontrado na página {pagina_atual}. Finalizando busca.")
-                break
-            
-            produtos_salvos_pagina = 0
-            for produto_data in produtos_lista:
-                try:
-                    produto_info = produto_data.get("produto", {})
-                    if produto_info and produto_info.get("id"):
-                        salvar_produto_db(conn, produto_info)
-                        
-                        id_produto = int(produto_info.get("id"))
-                        categorias_lista = produto_info.get("categoria", [])
-                        if categorias_lista:
-                            salvar_produto_categorias_db(conn, id_produto, categorias_lista)
-                        
-                        produtos_salvos_pagina += 1
-                except Exception as e:
-                    logger.error(f"Erro ao processar produto na página {pagina_atual}: {e}")
-                    continue
-            
-            conn.commit()
-            produtos_salvos_total += produtos_salvos_pagina
-            
-            # Atualizar progresso
-            atualizar_progresso_pagina(conn, PROCESSO_PRODUTOS, pagina_atual, total_paginas, produtos_salvos_pagina)
-            logger.info(f"✅ Página {pagina_atual} CONCLUÍDA: {produtos_salvos_pagina} produtos salvos")
-            
-            # Verificar se chegou ao fim
-            if pagina_atual >= total_paginas:
-                logger.info(f"Todas as páginas de produtos processadas ({pagina_atual}/{total_paginas}).")
-                finalizar_progresso(conn, PROCESSO_PRODUTOS, "CONCLUIDO", "🏁 Processo finalizado: ✅ SUCESSO")
-                break
-            
-            pagina_atual += 1
-            time.sleep(1)  # Pausa entre páginas
+    while pagina_atual <= MAX_PAGINAS_POR_ETAPA:
+        logger.info(f"📄 Processando página {pagina_atual} de produtos...")
         
-        logger.info(f"Busca de produtos finalizada. Total de produtos salvos: {produtos_salvos_total}")
+        params = {
+            "pagina": pagina_atual,
+            "dataAlteracao": data_filtro_api
+        }
+        
+        data = make_api_v2_request(ENDPOINT_PRODUTOS_PESQUISA, params)
+        if not data or "retorno" not in data:
+            logger.error(f"Falha na API para página {pagina_atual}")
+            finalizar_progresso(conn, PROCESSO_PRODUTOS, "ERRO", f"Falha na API página {pagina_atual}")
+            return False
+        
+        retorno = data["retorno"]
+        
+        # Verificar se há produtos
+        if "produtos" not in retorno or not retorno["produtos"]:
+            logger.info(f"Nenhum produto encontrado na página {pagina_atual}. Finalizando busca.")
+            finalizar_progresso(conn, PROCESSO_PRODUTOS, "CONCLUIDO")
+            break
+        
+        produtos = retorno["produtos"]
+        total_paginas = int(retorno.get("numero_paginas", 1))
+        
+        # Processar produtos da página
+        produtos_salvos_pagina = 0
+        for produto_resumo in produtos:
+            if processar_produto_completo(conn, produto_resumo):
+                produtos_salvos_pagina += 1
+        
+        total_produtos_salvos += produtos_salvos_pagina
+        
+        # Atualizar progresso
+        atualizar_progresso_pagina(conn, PROCESSO_PRODUTOS, pagina_atual, total_paginas, produtos_salvos_pagina)
+        
+        logger.info(f"✅ Página {pagina_atual} CONCLUÍDA: {produtos_salvos_pagina} produtos salvos")
+        
+        # Verificar se chegou na última página
+        if pagina_atual >= total_paginas:
+            logger.info(f"🏁 TODAS as páginas processadas! Total: {total_produtos_salvos} produtos")
+            finalizar_progresso(conn, PROCESSO_PRODUTOS, "CONCLUIDO")
+            break
+        
+        pagina_atual += 1
+        time.sleep(1)  # Rate limiting
+    
+    return True
+
+def processar_produto_completo(conn, produto_resumo):
+    """Processa um produto completo obtendo detalhes da API."""
+    try:
+        id_produto = produto_resumo.get("id")
+        if not id_produto:
+            return False
+        
+        # Obter detalhes completos do produto
+        params = {"id": id_produto}
+        data = make_api_v2_request(ENDPOINT_PRODUTO_OBTER, params)
+        
+        if not data or "retorno" not in data:
+            logger.warning(f"Falha ao obter detalhes do produto {id_produto}")
+            return False
+        
+        produto_completo = data["retorno"]["produto"]
+        
+        # Salvar produto no banco
+        return salvar_produto_db(conn, produto_completo)
+        
+    except Exception as e:
+        logger.error(f"Erro ao processar produto {produto_resumo}: {e}")
+        return False
+
+def salvar_produto_db(conn, produto):
+    """Salva produto no banco de dados."""
+    try:
+        with conn.cursor() as cur:
+            # Inserir/atualizar produto principal
+            cur.execute("""
+                INSERT INTO produtos (
+                    id_produto, nome_produto, codigo_produto, preco_produto, 
+                    unidade_produto, situacao_produto, data_criacao_produto, 
+                    gtin_produto, preco_promocional_produto, preco_custo_produto, 
+                    preco_custo_medio_produto, tipo_variacao_produto
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id_produto) DO UPDATE SET
+                    nome_produto = EXCLUDED.nome_produto,
+                    codigo_produto = EXCLUDED.codigo_produto,
+                    preco_produto = EXCLUDED.preco_produto,
+                    unidade_produto = EXCLUDED.unidade_produto,
+                    situacao_produto = EXCLUDED.situacao_produto,
+                    data_criacao_produto = EXCLUDED.data_criacao_produto,
+                    gtin_produto = EXCLUDED.gtin_produto,
+                    preco_promocional_produto = EXCLUDED.preco_promocional_produto,
+                    preco_custo_produto = EXCLUDED.preco_custo_produto,
+                    preco_custo_medio_produto = EXCLUDED.preco_custo_medio_produto,
+                    tipo_variacao_produto = EXCLUDED.tipo_variacao_produto
+            """, (
+                int(produto.get("id", 0)),
+                produto.get("nome", ""),
+                produto.get("codigo", ""),
+                safe_float_convert(produto.get("preco", 0)),
+                produto.get("unidade", ""),
+                produto.get("situacao", ""),
+                produto.get("data_criacao", ""),
+                produto.get("gtin", ""),
+                safe_float_convert(produto.get("preco_promocional", 0)),
+                safe_float_convert(produto.get("preco_custo", 0)),
+                safe_float_convert(produto.get("preco_custo_medio", 0)),
+                produto.get("tipo_variacao", "")
+            ))
+            
+            # Processar categorias do produto
+            categorias = produto.get("categoria", [])
+            if categorias:
+                # Limpar categorias antigas
+                cur.execute("DELETE FROM produto_categorias WHERE id_produto = %s", (int(produto.get("id", 0)),))
+                
+                # Inserir novas categorias
+                for categoria in categorias:
+                    id_categoria = categoria.get("id")
+                    if id_categoria:
+                        cur.execute("""
+                            INSERT INTO produto_categorias (id_produto, id_categoria)
+                            VALUES (%s, %s)
+                            ON CONFLICT DO NOTHING
+                        """, (int(produto.get("id", 0)), int(id_categoria)))
+        
         return True
         
     except Exception as e:
-        logger.error(f"Erro geral na busca de produtos: {e}", exc_info=True)
-        finalizar_progresso(conn, PROCESSO_PRODUTOS, "ERRO", f"❌ Erro geral: {str(e)}")
+        logger.error(f"Erro ao salvar produto {produto.get('id', 'N/A')}: {e}")
+        return False
+
+def get_estoques_v2(conn, data_filtro_api):
+    """Obtém atualizações de estoque da API v2."""
+    logger.info(f"Iniciando Estoques desde {data_filtro_api}.")
+    
+    pagina = 1
+    total_estoques_salvos = 0
+    
+    while True:
+        logger.info(f"Buscando pág {pagina} de estoques por DATA DE ALTERAÇÃO desde {data_filtro_api}.")
+        
+        params = {
+            "pagina": pagina,
+            "dataAlteracao": data_filtro_api
+        }
+        
+        data = make_api_v2_request(ENDPOINT_LISTA_ATUALIZACOES_ESTOQUE, params)
+        if not data or "retorno" not in data:
+            logger.error(f"Falha na API de estoques para página {pagina}")
+            return False
+        
+        retorno = data["retorno"]
+        
+        if "registros" not in retorno or not retorno["registros"]:
+            logger.info(f"Nenhum estoque encontrado na pág {pagina}. Finalizando busca.")
+            break
+        
+        registros = retorno["registros"]
+        
+        # Processar estoques da página
+        estoques_salvos_pagina = 0
+        for estoque in registros:
+            if salvar_estoque_db(conn, estoque):
+                estoques_salvos_pagina += 1
+        
+        total_estoques_salvos += estoques_salvos_pagina
+        logger.info(f"Página {pagina}: {estoques_salvos_pagina} estoques salvos")
+        
+        pagina += 1
+        time.sleep(1)  # Rate limiting
+    
+    logger.info(f"Busca de estoques finalizada. Total de estoques salvos: {total_estoques_salvos}")
+    return True
+
+def salvar_estoque_db(conn, estoque):
+    """Salva estoque no banco de dados."""
+    try:
+        id_produto = int(estoque.get("id", 0))
+        
+        with conn.cursor() as cur:
+            # Atualizar estoque total
+            cur.execute("""
+                INSERT INTO produto_estoque_total (
+                    id_produto, nome_produto_estoque, saldo_total_api, 
+                    saldo_reservado_api, data_ultima_atualizacao_api
+                ) VALUES (%s, %s, %s, %s, NOW())
+                ON CONFLICT (id_produto) DO UPDATE SET
+                    nome_produto_estoque = EXCLUDED.nome_produto_estoque,
+                    saldo_total_api = EXCLUDED.saldo_total_api,
+                    saldo_reservado_api = EXCLUDED.saldo_reservado_api,
+                    data_ultima_atualizacao_api = NOW()
+            """, (
+                id_produto,
+                estoque.get("nome", ""),
+                safe_float_convert(estoque.get("saldo", 0)),
+                safe_float_convert(estoque.get("saldo_reservado", 0))
+            ))
+            
+            # Processar depósitos
+            depositos = estoque.get("depositos", [])
+            if depositos:
+                # Limpar depósitos antigos
+                cur.execute("DELETE FROM produto_estoque_depositos WHERE id_produto = %s", (id_produto,))
+                
+                # Inserir novos depósitos
+                for deposito in depositos:
+                    cur.execute("""
+                        INSERT INTO produto_estoque_depositos (
+                            id_produto, nome_deposito, saldo_deposito, 
+                            desconsiderar_deposito, empresa_deposito
+                        ) VALUES (%s, %s, %s, %s, %s)
+                    """, (
+                        id_produto,
+                        deposito.get("nome", ""),
+                        safe_float_convert(deposito.get("saldo", 0)),
+                        deposito.get("desconsiderar", ""),
+                        deposito.get("empresa", "")
+                    ))
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Erro ao salvar estoque {estoque.get('id', 'N/A')}: {e}")
         return False
 
 def search_pedidos_v2_com_controle(conn, data_filtro_api):
@@ -545,194 +671,224 @@ def search_pedidos_v2_com_controle(conn, data_filtro_api):
     logger.info(f"🚀 INICIANDO busca de pedidos desde página {pagina_inicial}")
     
     pagina_atual = pagina_inicial
-    pedidos_salvos_total = 0
+    total_pedidos_salvos = 0
     
-    try:
-        while pagina_atual <= MAX_PAGINAS_POR_ETAPA:
-            logger.info(f"📄 Processando página {pagina_atual} de pedidos...")
-            
-            params = {
-                "dataAlteracaoInicial": data_filtro_api,
-                "pagina": pagina_atual
-            }
-            
-            data = make_api_v2_request(ENDPOINT_PEDIDOS_PESQUISA, params)
-            if not data or "retorno" not in data:
-                logger.error(f"Falha API pedidos pág {pagina_atual} por DATA DE ALTERAÇÃO desde {data_filtro_api}.")
-                finalizar_progresso(conn, PROCESSO_PEDIDOS, "ERRO", f"❌ Falha na API - página {pagina_atual}")
-                return False
-            
-            retorno = data["retorno"]
-            pedidos_lista = retorno.get("pedidos", [])
-            total_paginas = int(retorno.get("numero_paginas", 1))
-            
-            if not pedidos_lista:
-                logger.info(f"Nenhum pedido encontrado na página {pagina_atual}. Finalizando busca.")
-                break
-            
-            pedidos_salvos_pagina = 0
-            for pedido_data in pedidos_lista:
-                try:
-                    pedido_info = pedido_data.get("pedido", {})
-                    if pedido_info and pedido_info.get("id"):
-                        salvar_pedido_db(conn, pedido_info)
-                        
-                        id_pedido = int(pedido_info.get("id"))
-                        itens_lista = pedido_info.get("itens", [])
-                        if itens_lista:
-                            salvar_pedido_itens_db(conn, id_pedido, itens_lista)
-                        
-                        pedidos_salvos_pagina += 1
-                except Exception as e:
-                    logger.error(f"Erro ao processar pedido na página {pagina_atual}: {e}")
-                    continue
-            
-            conn.commit()
-            pedidos_salvos_total += pedidos_salvos_pagina
-            
-            # Atualizar progresso
-            atualizar_progresso_pagina(conn, PROCESSO_PEDIDOS, pagina_atual, total_paginas, pedidos_salvos_pagina)
-            logger.info(f"✅ Página {pagina_atual} CONCLUÍDA: {pedidos_salvos_pagina} pedidos salvos")
-            
-            # Verificar se chegou ao fim
-            if pagina_atual >= total_paginas:
-                logger.info(f"Todas as páginas de pedidos processadas ({pagina_atual}/{total_paginas}).")
-                finalizar_progresso(conn, PROCESSO_PEDIDOS, "CONCLUIDO", "🏁 Processo finalizado: ✅ SUCESSO")
-                break
-            
-            pagina_atual += 1
-            time.sleep(1)  # Pausa entre páginas
+    while pagina_atual <= MAX_PAGINAS_POR_ETAPA:
+        logger.info(f"📄 Processando página {pagina_atual} de pedidos...")
         
-        logger.info(f"Busca de pedidos finalizada. Total de pedidos salvos: {pedidos_salvos_total}")
+        params = {
+            "pagina": pagina_atual,
+            "dataAlteracao": data_filtro_api
+        }
+        
+        data = make_api_v2_request(ENDPOINT_PEDIDOS_PESQUISA, params)
+        if not data or "retorno" not in data:
+            logger.error(f"Falha na API para página {pagina_atual}")
+            finalizar_progresso(conn, PROCESSO_PEDIDOS, "ERRO", f"Falha na API página {pagina_atual}")
+            return False
+        
+        retorno = data["retorno"]
+        
+        # Verificar se há pedidos
+        if "pedidos" not in retorno or not retorno["pedidos"]:
+            logger.info(f"Nenhum pedido encontrado na página {pagina_atual}. Finalizando busca.")
+            finalizar_progresso(conn, PROCESSO_PEDIDOS, "CONCLUIDO")
+            break
+        
+        pedidos = retorno["pedidos"]
+        total_paginas = int(retorno.get("numero_paginas", 1))
+        
+        # Processar pedidos da página
+        pedidos_salvos_pagina = 0
+        for pedido_resumo in pedidos:
+            if processar_pedido_completo(conn, pedido_resumo):
+                pedidos_salvos_pagina += 1
+        
+        total_pedidos_salvos += pedidos_salvos_pagina
+        
+        # Atualizar progresso
+        atualizar_progresso_pagina(conn, PROCESSO_PEDIDOS, pagina_atual, total_paginas, pedidos_salvos_pagina)
+        
+        logger.info(f"✅ Página {pagina_atual} CONCLUÍDA: {pedidos_salvos_pagina} pedidos salvos")
+        
+        # Verificar se chegou na última página
+        if pagina_atual >= total_paginas:
+            logger.info(f"🏁 TODAS as páginas processadas! Total: {total_pedidos_salvos} pedidos")
+            finalizar_progresso(conn, PROCESSO_PEDIDOS, "CONCLUIDO")
+            break
+        
+        pagina_atual += 1
+        time.sleep(1)  # Rate limiting
+    
+    return True
+
+def processar_pedido_completo(conn, pedido_resumo):
+    """Processa um pedido completo obtendo detalhes da API."""
+    try:
+        id_pedido = pedido_resumo.get("id")
+        if not id_pedido:
+            return False
+        
+        # Obter detalhes completos do pedido
+        params = {"id": id_pedido}
+        data = make_api_v2_request(ENDPOINT_PEDIDO_OBTER, params)
+        
+        if not data or "retorno" not in data:
+            logger.warning(f"Falha ao obter detalhes do pedido {id_pedido}")
+            return False
+        
+        pedido_completo = data["retorno"]["pedido"]
+        
+        # Salvar pedido no banco
+        return salvar_pedido_db(conn, pedido_completo)
+        
+    except Exception as e:
+        logger.error(f"Erro ao processar pedido {pedido_resumo}: {e}")
+        return False
+
+def salvar_pedido_db(conn, pedido):
+    """Salva pedido e seus itens no banco de dados."""
+    try:
+        id_pedido = int(pedido.get("id", 0))
+        
+        with conn.cursor() as cur:
+            # Inserir/atualizar pedido principal
+            cur.execute("""
+                INSERT INTO pedidos (
+                    id_pedido, numero_pedido, numero_ecommerce, data_pedido, 
+                    data_prevista, nome_cliente, valor_pedido, id_vendedor, 
+                    nome_vendedor, situacao_pedido, codigo_rastreamento
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id_pedido) DO UPDATE SET
+                    numero_pedido = EXCLUDED.numero_pedido,
+                    numero_ecommerce = EXCLUDED.numero_ecommerce,
+                    data_pedido = EXCLUDED.data_pedido,
+                    data_prevista = EXCLUDED.data_prevista,
+                    nome_cliente = EXCLUDED.nome_cliente,
+                    valor_pedido = EXCLUDED.valor_pedido,
+                    id_vendedor = EXCLUDED.id_vendedor,
+                    nome_vendedor = EXCLUDED.nome_vendedor,
+                    situacao_pedido = EXCLUDED.situacao_pedido,
+                    codigo_rastreamento = EXCLUDED.codigo_rastreamento
+            """, (
+                id_pedido,
+                pedido.get("numero", ""),
+                pedido.get("numero_ecommerce", ""),
+                pedido.get("data_pedido", ""),
+                pedido.get("data_prevista", ""),
+                pedido.get("nome_cliente", ""),
+                safe_float_convert(pedido.get("valor_pedido", 0)),
+                int(pedido.get("id_vendedor", 0)) if pedido.get("id_vendedor") else None,
+                pedido.get("nome_vendedor", ""),
+                pedido.get("situacao", ""),
+                pedido.get("codigo_rastreamento", "")
+            ))
+            
+            # Processar itens do pedido
+            itens = pedido.get("itens", [])
+            if itens:
+                # Limpar itens antigos
+                cur.execute("DELETE FROM pedido_itens WHERE id_pedido = %s", (id_pedido,))
+                
+                # Inserir novos itens
+                for item in itens:
+                    cur.execute("""
+                        INSERT INTO pedido_itens (
+                            id_pedido, id_produto_tiny, codigo_produto_pedido, 
+                            descricao_produto_pedido, quantidade, unidade_pedido, 
+                            valor_unitario_pedido, id_grade_pedido
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        id_pedido,
+                        int(item.get("id_produto", 0)) if item.get("id_produto") else None,
+                        item.get("codigo", ""),
+                        item.get("descricao", ""),
+                        safe_float_convert(item.get("quantidade", 0)),
+                        item.get("unidade", ""),
+                        safe_float_convert(item.get("valor_unitario", 0)),
+                        item.get("id_grade", "")
+                    ))
+        
         return True
         
     except Exception as e:
-        logger.error(f"Erro geral na busca de pedidos: {e}", exc_info=True)
-        finalizar_progresso(conn, PROCESSO_PEDIDOS, "ERRO", f"❌ Erro geral: {str(e)}")
+        logger.error(f"Erro ao salvar pedido {pedido.get('id', 'N/A')}: {e}")
         return False
 
-def get_estoques_v2(conn, data_filtro_api):
-    logger.info(f"Iniciando Estoques desde {data_filtro_api}.")
-    pagina = 1; estoques_salvos = 0
-    while pagina <= MAX_PAGINAS_POR_ETAPA:
-        logger.info(f"Buscando pág {pagina} de estoques por DATA DE ALTERAÇÃO desde {data_filtro_api}.")
-        params = {"dataAlteracaoInicial": data_filtro_api, "pagina": pagina}
-        data = make_api_v2_request(ENDPOINT_LISTA_ATUALIZACOES_ESTOQUE, params)
-        if not data or "retorno" not in data: logger.error(f"Falha API estoques pág {pagina} por DATA DE ALTERAÇÃO desde {data_filtro_api}."); return False
-        retorno = data["retorno"]; produtos_lista = retorno.get("produtos", [])
-        if not produtos_lista: logger.info(f"Nenhum estoque encontrado na pág {pagina}. Finalizando busca."); break
-        for produto_data in produtos_lista:
-            try:
-                produto_info = produto_data.get("produto", {})
-                if produto_info and produto_info.get("id"):
-                    id_produto = int(produto_info.get("id")); nome_produto = produto_info.get("nome")
-                    saldo_total = produto_info.get("saldo"); saldo_reservado = produto_info.get("saldoReservado")
-                    data_atualizacao = produto_info.get("dataUltimaAtualizacao")
-                    salvar_produto_estoque_total_db(conn, id_produto, nome_produto, saldo_total, saldo_reservado, data_atualizacao)
-                    depositos_lista = produto_info.get("depositos", [])
-                    if depositos_lista: salvar_produto_estoque_depositos_db(conn, id_produto, depositos_lista)
-                    estoques_salvos += 1
-            except Exception as e: logger.error(f"Erro ao processar estoque na pág {pagina}: {e}"); continue
-        if conn and not conn.closed: conn.commit()
-        logger.info(f"Pág {pagina} estoques commitada.")
-        total_paginas = int(retorno.get("numero_paginas", 1))
-        if pagina >= total_paginas: logger.info(f"Todas págs estoques processadas ({pagina}/{total_paginas})."); break
-        pagina += 1; time.sleep(1)
-    logger.info(f"Busca de estoques finalizada. Total de estoques salvos: {estoques_salvos}"); return True
-
-def contar_registros_tabela(conn, nome_tabela):
-    try:
-        with conn.cursor() as cur:
-            cur.execute(sql.SQL("SELECT COUNT(*) FROM {}").format(sql.Identifier(nome_tabela)))
-            return cur.fetchone()[0]
-    except Exception as e: logger.error(f"Erro ao contar registros da tabela '{nome_tabela}': {e}"); return 0
-
 # ===== FUNÇÃO PRINCIPAL =====
-if __name__ == "__main__":
-    inicio_script = time.time()
+def main():
+    """Função principal do script."""
     logger.info("=== Iniciando Cliente API v2 Tiny ERP - MODO PRODUÇÃO (Lógica Híbrida) ===")
     
-    db_conn = get_db_connection()
-    if not db_conn:
-        logger.critical("Não foi possível conectar ao banco de dados. Encerrando.")
-        exit(1)
+    # Conectar ao banco
+    conn = get_db_connection()
+    if not conn:
+        logger.error("Falha na conexão com o banco de dados. Encerrando.")
+        return False
     
     try:
-        criar_tabelas_db(db_conn)
+        # Criar tabelas
+        criar_tabelas_db(conn)
         
         # PASSO 1: Categorias
         logger.info("--- PASSO 1: Categorias ---")
-        if get_categorias_v2(db_conn):
-            set_ultima_execucao(db_conn, PROCESSO_CATEGORIAS)
-            logger.info("Passo 1 (Categorias) concluído.")
-        else:
+        if not get_categorias_v2(conn):
             logger.error("Falha no passo 1 (Categorias).")
+        else:
+            logger.info("Passo 1 (Categorias) concluído.")
         
         logger.info("----------------------------------------------------------------------")
         
-        # PASSO 2: Produtos (com verificação inteligente)
+        # PASSO 2: Produtos
         logger.info("--- PASSO 2: Produtos (Cadastrais e Categorias) ---")
-        data_filtro_prod_api = determinar_data_filtro_inteligente(db_conn, PROCESSO_PRODUTOS, DIAS_JANELA_SEGURANCA)
-        logger.info(f"Iniciando busca de produtos (cadastrais) desde: {data_filtro_prod_api}.")
+        data_filtro_produtos = determinar_data_filtro_inteligente(conn, PROCESSO_PRODUTOS, DIAS_JANELA_SEGURANCA)
+        logger.info(f"Iniciando busca de produtos (cadastrais) desde: {data_filtro_produtos}.")
         
-        if search_produtos_v2_com_controle(db_conn, data_filtro_prod_api):
-            set_ultima_execucao(db_conn, PROCESSO_PRODUTOS)
+        if search_produtos_v2_com_controle(conn, data_filtro_produtos):
+            set_ultima_execucao(conn, PROCESSO_PRODUTOS)
             logger.info("Passo 2 (Produtos) concluído.")
         else:
-            logger.error("Falha no processamento de produtos.")
-            logger.warning("Passo 2 (Produtos) com erros. Timestamp de auditoria NÃO atualizado.")
+            logger.error("Falha no passo 2 (Produtos).")
         
         logger.info("----------------------------------------------------------------------")
         
         # PASSO 3: Estoques
         logger.info("--- PASSO 3: Estoques ---")
-        data_filtro_est_api = determinar_data_filtro_inteligente(db_conn, PROCESSO_ESTOQUES, DIAS_JANELA_SEGURANCA)
-        logger.info(f"Iniciando busca de estoques desde: {data_filtro_est_api}.")
+        data_filtro_estoques = determinar_data_filtro_inteligente(conn, PROCESSO_ESTOQUES, DIAS_JANELA_SEGURANCA)
+        logger.info(f"Iniciando busca de estoques desde: {data_filtro_estoques}.")
         
-        if get_estoques_v2(db_conn, data_filtro_est_api):
-            set_ultima_execucao(db_conn, PROCESSO_ESTOQUES)
+        if get_estoques_v2(conn, data_filtro_estoques):
+            set_ultima_execucao(conn, PROCESSO_ESTOQUES)
             logger.info("Todas págs estoques processadas.")
         else:
-            logger.error("Falha no processamento de estoques.")
-            logger.warning("Passo 3 (Estoques) com erros. Timestamp de auditoria NÃO atualizado.")
+            logger.error("Falha no passo 3 (Estoques).")
         
         logger.info("----------------------------------------------------------------------")
         
-        # PASSO 4: Pedidos (com controle granular)
+        # PASSO 4: Pedidos
         logger.info("--- PASSO 4: Pedidos e Itens ---")
-        data_filtro_ped_api = determinar_data_filtro_inteligente(db_conn, PROCESSO_PEDIDOS, DIAS_JANELA_SEGURANCA)
-        logger.info(f"Iniciando busca de pedidos alterados desde: {data_filtro_ped_api}.")
+        data_filtro_pedidos = determinar_data_filtro_inteligente(conn, PROCESSO_PEDIDOS, DIAS_JANELA_SEGURANCA)
+        logger.info(f"Iniciando busca de pedidos alterados desde: {data_filtro_pedidos}.")
         
-        if search_pedidos_v2_com_controle(db_conn, data_filtro_ped_api):
-            set_ultima_execucao(db_conn, PROCESSO_PEDIDOS)
+        if search_pedidos_v2_com_controle(conn, data_filtro_pedidos):
+            set_ultima_execucao(conn, PROCESSO_PEDIDOS)
             logger.info("Passo 4 (Pedidos) concluído.")
         else:
-            logger.error("Falha no processamento de pedidos.")
-            logger.warning("Passo 4 (Pedidos) com erros. Timestamp de auditoria NÃO atualizado.")
+            logger.error("Falha no passo 4 (Pedidos).")
         
         logger.info("----------------------------------------------------------------------")
+        logger.info("=== SINCRONIZAÇÃO CONCLUÍDA ===")
         
-        # Contagem final
-        logger.info("--- Contagem final dos registros no banco de dados ---")
-        tabelas = ["categorias", "produtos", "produto_categorias", "produto_estoque_total", "produto_estoque_depositos", "pedidos", "pedido_itens", "script_ultima_execucao", "script_progresso_paginas"]
-        for tabela in tabelas:
-            count = contar_registros_tabela(db_conn, tabela)
-            logger.info(f"  - Tabela '{tabela}': {count} regs.")
-    
+        return True
+        
     except Exception as e:
-        logger.critical(f"ERRO GERAL NO PROCESSAMENTO: {e}", exc_info=True)
-        if db_conn and not db_conn.closed:
-            try:
-                db_conn.rollback()
-                logger.info("Rollback por erro geral bem-sucedido.")
-            except Exception as rollback_error:
-                logger.error(f"Erro durante rollback: {rollback_error}")
-    
+        logger.error(f"Erro geral na execução: {e}", exc_info=True)
+        return False
     finally:
-        if db_conn and not db_conn.closed:
-            db_conn.close()
-            logger.info("Conexão PostgreSQL fechada.")
-        
-        tempo_total = time.time() - inicio_script
-        logger.info(f"=== Processo Concluído em {tempo_total:.2f} segundos ===")
+        if conn and not conn.closed:
+            conn.close()
+            logger.info("Conexão com banco de dados fechada.")
+
+if __name__ == "__main__":
+    main()
 
