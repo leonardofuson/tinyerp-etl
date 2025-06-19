@@ -214,17 +214,41 @@ def verificar_processo_concluido(conn, processo):
         return False, "Erro na verificação"
 
 # ===== FUNÇÃO MODIFICADA: INICIALIZAÇÃO INTELIGENTE =====
-def inicializar_progresso(conn, processo, data_filtro_api):
+def inicializar_progresso(conn, processo, data_filtro_api, eh_busca_incremental=True):
     """Inicializa progresso de forma inteligente, verificando se já foi concluído."""
     
-    # 1. Verificar se processo já foi concluído
+    # Para buscas incrementais (por data), sempre verificar novos dados
+    if eh_busca_incremental:
+        logger.info(f"🔄 BUSCA INCREMENTAL: {processo} - Verificando dados desde {data_filtro_api}")
+        # Resetar progresso para busca incremental
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO script_progresso_paginas 
+                    (processo, data_filtro_api, pagina_atual, total_paginas, registros_processados, timestamp_inicio, timestamp_ultima_pagina, status_execucao)
+                    VALUES (%s, %s, 0, 0, 0, NOW(), NOW(), 'EM_ANDAMENTO')
+                    ON CONFLICT (processo) DO UPDATE SET
+                        data_filtro_api = EXCLUDED.data_filtro_api,
+                        pagina_atual = 0,
+                        total_paginas = 0,
+                        registros_processados = 0,
+                        timestamp_inicio = NOW(),
+                        status_execucao = 'EM_ANDAMENTO'
+                """, (processo, data_filtro_api))
+                conn.commit()
+                return 1
+        except Exception as e:
+            logger.error(f"Erro ao inicializar busca incremental para {processo}: {e}")
+            return 1
+    
+    # Para cargas completas, verificar se já foi concluído
     concluido, mensagem = verificar_processo_concluido(conn, processo)
     
     if concluido:
         logger.info(f"⏭️ PULANDO: {processo} - {mensagem}")
         return "CONCLUIDO"
     
-    # 2. Se não concluído, verificar se há progresso em andamento
+    # Se não concluído, verificar se há progresso em andamento
     logger.info(f"🔍 VERIFICANDO: {processo} - {mensagem}")
     
     try:
@@ -418,8 +442,8 @@ def get_categorias_v2(conn):
 def search_produtos_v2_com_controle(conn, data_filtro_api):
     """Busca produtos com controle granular de progresso."""
     
-    # Verificar se processo já foi concluído
-    pagina_inicial = inicializar_progresso(conn, PROCESSO_PRODUTOS, data_filtro_api)
+    # Para produtos, sempre fazer busca incremental (verificar alterações por data)
+    pagina_inicial = inicializar_progresso(conn, PROCESSO_PRODUTOS, data_filtro_api, eh_busca_incremental=True)
     
     if pagina_inicial == "CONCLUIDO":
         logger.info("⏭️ Produtos já processados completamente. Pulando etapa.")
@@ -593,11 +617,18 @@ def get_estoques_v2(conn, data_filtro_api):
         
         retorno = data["retorno"]
         
+        # DEBUG: Log da estrutura de retorno
+        logger.info(f"DEBUG ESTOQUES - Estrutura retorno página {pagina}: {list(retorno.keys()) if isinstance(retorno, dict) else type(retorno)}")
+        
         if "registros" not in retorno or not retorno["registros"]:
             logger.info(f"Nenhum estoque encontrado na pág {pagina}. Finalizando busca.")
+            # DEBUG: Log do conteúdo completo se não há registros
+            if isinstance(retorno, dict) and len(str(retorno)) < 500:
+                logger.info(f"DEBUG ESTOQUES - Conteúdo completo retorno: {retorno}")
             break
         
         registros = retorno["registros"]
+        logger.info(f"DEBUG ESTOQUES - Encontrados {len(registros)} registros na página {pagina}")
         
         # Processar estoques da página
         estoques_salvos_pagina = 0
@@ -668,8 +699,8 @@ def salvar_estoque_db(conn, estoque):
 def search_pedidos_v2_com_controle(conn, data_filtro_api):
     """Busca pedidos com controle granular de progresso."""
     
-    # Verificar se processo já foi concluído
-    pagina_inicial = inicializar_progresso(conn, PROCESSO_PEDIDOS, data_filtro_api)
+    # Para pedidos, verificar se há progresso em andamento (não é busca incremental pura)
+    pagina_inicial = inicializar_progresso(conn, PROCESSO_PEDIDOS, data_filtro_api, eh_busca_incremental=False)
     
     if pagina_inicial == "CONCLUIDO":
         logger.info("⏭️ Pedidos já processados completamente. Pulando etapa.")
