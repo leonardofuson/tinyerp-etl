@@ -88,7 +88,6 @@ def criar_tabelas_db(conn):
         """CREATE TABLE IF NOT EXISTS script_progresso_paginas (
             id SERIAL PRIMARY KEY,
             processo TEXT NOT NULL,
-            data_filtro_api TEXT,
             pagina_atual INTEGER DEFAULT 0,
             total_paginas INTEGER DEFAULT 0,
             registros_processados INTEGER DEFAULT 0,
@@ -99,9 +98,25 @@ def criar_tabelas_db(conn):
             UNIQUE(processo)
         );"""
     )
+    
+    # Comandos para adicionar colunas que podem não existir
+    alter_commands = (
+        """ALTER TABLE script_progresso_paginas ADD COLUMN IF NOT EXISTS data_filtro_api TEXT;""",
+    )
+    
     try:
         with conn.cursor() as cur:
-            for cmd in commands: cur.execute(cmd)
+            # Criar tabelas
+            for cmd in commands: 
+                cur.execute(cmd)
+            
+            # Adicionar colunas que podem não existir
+            for cmd in alter_commands:
+                try:
+                    cur.execute(cmd)
+                except Exception as e:
+                    logger.debug(f"Comando ALTER ignorado (coluna pode já existir): {e}")
+                    
         if conn and not conn.closed: conn.commit()
         logger.info("Todas as tabelas foram verificadas/criadas.")
     except (Exception, psycopg2.DatabaseError) as e:
@@ -217,42 +232,9 @@ def verificar_processo_concluido(conn, processo):
 def inicializar_progresso(conn, processo, data_filtro_api, eh_busca_incremental=True):
     """Inicializa progresso de forma inteligente, verificando se já foi concluído."""
     
-    # Para buscas incrementais (por data), sempre verificar novos dados
-    if eh_busca_incremental:
-        logger.info(f"🔄 BUSCA INCREMENTAL: {processo} - Verificando dados desde {data_filtro_api}")
-        # Resetar progresso para busca incremental
-        try:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO script_progresso_paginas 
-                    (processo, data_filtro_api, pagina_atual, total_paginas, registros_processados, timestamp_inicio, timestamp_ultima_pagina, status_execucao)
-                    VALUES (%s, %s, 0, 0, 0, NOW(), NOW(), 'EM_ANDAMENTO')
-                    ON CONFLICT (processo) DO UPDATE SET
-                        data_filtro_api = EXCLUDED.data_filtro_api,
-                        pagina_atual = 0,
-                        total_paginas = 0,
-                        registros_processados = 0,
-                        timestamp_inicio = NOW(),
-                        status_execucao = 'EM_ANDAMENTO'
-                """, (processo, data_filtro_api))
-                conn.commit()
-                return 1
-        except Exception as e:
-            logger.error(f"Erro ao inicializar busca incremental para {processo}: {e}")
-            return 1
-    
-    # Para cargas completas, verificar se já foi concluído
-    concluido, mensagem = verificar_processo_concluido(conn, processo)
-    
-    if concluido:
-        logger.info(f"⏭️ PULANDO: {processo} - {mensagem}")
-        return "CONCLUIDO"
-    
-    # Se não concluído, verificar se há progresso em andamento
-    logger.info(f"🔍 VERIFICANDO: {processo} - {mensagem}")
-    
     try:
         with conn.cursor() as cur:
+            # Verificar se há progresso em andamento
             cur.execute("""
                 SELECT pagina_atual, total_paginas, registros_processados, status_execucao
                 FROM script_progresso_paginas 
@@ -262,29 +244,49 @@ def inicializar_progresso(conn, processo, data_filtro_api, eh_busca_incremental=
             
             if result:
                 pagina_atual, total_paginas, registros, status = result
-                logger.warning(f"🔄 RECUPERANDO PROGRESSO: {processo} estava na página {pagina_atual}")
-                logger.warning(f"▶️ CONTINUANDO da página {pagina_atual + 1} (já processados: {registros} registros)")
-                return pagina_atual + 1
-            else:
-                logger.info(f"🆕 INICIANDO novo progresso para {processo} desde {data_filtro_api}")
-                # Criar novo registro de progresso
-                cur.execute("""
-                    INSERT INTO script_progresso_paginas 
-                    (processo, data_filtro_api, pagina_atual, total_paginas, registros_processados, timestamp_inicio, timestamp_ultima_pagina, status_execucao)
-                    VALUES (%s, %s, 0, 0, 0, NOW(), NOW(), 'EM_ANDAMENTO')
-                    ON CONFLICT (processo) DO UPDATE SET
-                        data_filtro_api = EXCLUDED.data_filtro_api,
-                        pagina_atual = 0,
-                        total_paginas = 0,
-                        registros_processados = 0,
-                        timestamp_inicio = NOW(),
-                        status_execucao = 'EM_ANDAMENTO'
-                """, (processo, data_filtro_api))
-                conn.commit()
-                return 1
+                
+                # Se está concluído e é busca incremental, resetar para nova busca
+                if status == 'CONCLUIDO' and eh_busca_incremental:
+                    logger.info(f"🔄 BUSCA INCREMENTAL: {processo} - Resetando progresso para nova busca desde {data_filtro_api}")
+                    cur.execute("""
+                        UPDATE script_progresso_paginas 
+                        SET pagina_atual = 0, total_paginas = 0, registros_processados = 0,
+                            timestamp_inicio = NOW(), status_execucao = 'EM_ANDAMENTO'
+                        WHERE processo = %s
+                    """, (processo,))
+                    conn.commit()
+                    return 1
+                
+                # Se está concluído e NÃO é busca incremental, pular
+                elif status == 'CONCLUIDO' and not eh_busca_incremental:
+                    logger.info(f"⏭️ PULANDO: {processo} - Processo já concluído: {pagina_atual}/{total_paginas} páginas ({registros} registros)")
+                    return "CONCLUIDO"
+                
+                # Se está em andamento ou com erro, continuar de onde parou
+                elif status in ['EM_ANDAMENTO', 'ERRO']:
+                    logger.warning(f"🔄 RECUPERANDO PROGRESSO: {processo} estava na página {pagina_atual}")
+                    logger.warning(f"▶️ CONTINUANDO da página {pagina_atual + 1} (já processados: {registros} registros)")
+                    return pagina_atual + 1
+            
+            # Se não há progresso, iniciar novo
+            logger.info(f"🆕 INICIANDO novo progresso para {processo} desde {data_filtro_api}")
+            cur.execute("""
+                INSERT INTO script_progresso_paginas 
+                (processo, pagina_atual, total_paginas, registros_processados, timestamp_inicio, timestamp_ultima_pagina, status_execucao)
+                VALUES (%s, 0, 0, 0, NOW(), NOW(), 'EM_ANDAMENTO')
+                ON CONFLICT (processo) DO UPDATE SET
+                    pagina_atual = 0,
+                    total_paginas = 0,
+                    registros_processados = 0,
+                    timestamp_inicio = NOW(),
+                    status_execucao = 'EM_ANDAMENTO'
+            """, (processo,))
+            conn.commit()
+            return 1
                 
     except Exception as e:
         logger.error(f"Erro ao inicializar progresso para {processo}: {e}")
+        if conn and not conn.closed: conn.rollback()
         return 1
 
 def atualizar_progresso_pagina(conn, processo, pagina_atual, total_paginas, registros_processados):
@@ -595,40 +597,52 @@ def salvar_produto_db(conn, produto):
         logger.error(f"Erro ao salvar produto {produto.get('id', 'N/A')}: {e}")
         return False
 
-def get_estoques_v2(conn, data_filtro_api):
-    """Obtém atualizações de estoque da API v2."""
-    logger.info(f"Iniciando Estoques desde {data_filtro_api}.")
+def get_estoques_v2_com_controle(conn, data_filtro_api):
+    """Obtém atualizações de estoque da API v2 com controle de progresso."""
     
-    pagina = 1
+    # Para estoques, usar busca incremental
+    pagina_inicial = inicializar_progresso(conn, PROCESSO_ESTOQUES, data_filtro_api, eh_busca_incremental=True)
+    
+    if pagina_inicial == "CONCLUIDO":
+        logger.info("⏭️ Estoques já processados completamente. Pulando etapa.")
+        return True
+    
+    logger.info(f"🚀 INICIANDO busca de estoques desde página {pagina_inicial}")
+    
+    pagina_atual = pagina_inicial
     total_estoques_salvos = 0
+    total_paginas_api = None
     
     while True:
-        logger.info(f"Buscando pág {pagina} de estoques por DATA DE ALTERAÇÃO desde {data_filtro_api}.")
+        logger.info(f"📄 Processando página {pagina_atual} de estoques...")
         
         params = {
-            "pagina": pagina,
+            "pagina": pagina_atual,
             "dataAlteracao": data_filtro_api
         }
         
         data = make_api_v2_request(ENDPOINT_LISTA_ATUALIZACOES_ESTOQUE, params)
         if not data or "retorno" not in data:
-            logger.error(f"Falha na API de estoques para página {pagina}")
+            logger.error(f"Falha na API de estoques para página {pagina_atual}")
+            finalizar_progresso(conn, PROCESSO_ESTOQUES, "ERRO", f"Falha na API página {pagina_atual}")
             return False
         
         retorno = data["retorno"]
         
         # DEBUG: Log da estrutura de retorno
-        logger.info(f"DEBUG ESTOQUES - Estrutura retorno página {pagina}: {list(retorno.keys()) if isinstance(retorno, dict) else type(retorno)}")
+        logger.info(f"DEBUG ESTOQUES - Estrutura retorno página {pagina_atual}: {list(retorno.keys()) if isinstance(retorno, dict) else type(retorno)}")
         
         if "registros" not in retorno or not retorno["registros"]:
-            logger.info(f"Nenhum estoque encontrado na pág {pagina}. Finalizando busca.")
+            logger.info(f"Nenhum estoque encontrado na página {pagina_atual}. Finalizando busca.")
             # DEBUG: Log do conteúdo completo se não há registros
             if isinstance(retorno, dict) and len(str(retorno)) < 500:
                 logger.info(f"DEBUG ESTOQUES - Conteúdo completo retorno: {retorno}")
+            finalizar_progresso(conn, PROCESSO_ESTOQUES, "CONCLUIDO")
             break
         
         registros = retorno["registros"]
-        logger.info(f"DEBUG ESTOQUES - Encontrados {len(registros)} registros na página {pagina}")
+        total_paginas_api = int(retorno.get("numero_paginas", 1))
+        logger.info(f"DEBUG ESTOQUES - Encontrados {len(registros)} registros na página {pagina_atual}")
         
         # Processar estoques da página
         estoques_salvos_pagina = 0
@@ -637,9 +651,25 @@ def get_estoques_v2(conn, data_filtro_api):
                 estoques_salvos_pagina += 1
         
         total_estoques_salvos += estoques_salvos_pagina
-        logger.info(f"Página {pagina}: {estoques_salvos_pagina} estoques salvos")
         
-        pagina += 1
+        # Atualizar progresso
+        atualizar_progresso_pagina(conn, PROCESSO_ESTOQUES, pagina_atual, total_paginas_api, estoques_salvos_pagina)
+        
+        logger.info(f"✅ Página {pagina_atual} CONCLUÍDA: {estoques_salvos_pagina} estoques salvos")
+        
+        # Verificar se chegou na última página
+        if pagina_atual >= total_paginas_api:
+            logger.info(f"🏁 TODAS as páginas processadas! Total: {total_estoques_salvos} estoques")
+            finalizar_progresso(conn, PROCESSO_ESTOQUES, "CONCLUIDO")
+            break
+        
+        # Verificar limite de segurança para evitar loops infinitos
+        if pagina_atual > MAX_PAGINAS_POR_ETAPA:
+            logger.warning(f"⚠️ LIMITE DE SEGURANÇA atingido na página {pagina_atual}. Pausando para próxima execução.")
+            finalizar_progresso(conn, PROCESSO_ESTOQUES, "EM_ANDAMENTO", f"Pausado na página {pagina_atual}")
+            break
+        
+        pagina_atual += 1
         time.sleep(1)  # Rate limiting
     
     logger.info(f"Busca de estoques finalizada. Total de estoques salvos: {total_estoques_salvos}")
@@ -699,8 +729,8 @@ def salvar_estoque_db(conn, estoque):
 def search_pedidos_v2_com_controle(conn, data_filtro_api):
     """Busca pedidos com controle granular de progresso."""
     
-    # Para pedidos, verificar se há progresso em andamento (não é busca incremental pura)
-    pagina_inicial = inicializar_progresso(conn, PROCESSO_PEDIDOS, data_filtro_api, eh_busca_incremental=False)
+    # Para pedidos, usar busca incremental COM checkpoint (híbrido)
+    pagina_inicial = inicializar_progresso(conn, PROCESSO_PEDIDOS, data_filtro_api, eh_busca_incremental=True)
     
     if pagina_inicial == "CONCLUIDO":
         logger.info("⏭️ Pedidos já processados completamente. Pulando etapa.")
@@ -902,7 +932,7 @@ def main():
         data_filtro_estoques = determinar_data_filtro_inteligente(conn, PROCESSO_ESTOQUES, DIAS_JANELA_SEGURANCA)
         logger.info(f"Iniciando busca de estoques desde: {data_filtro_estoques}.")
         
-        if get_estoques_v2(conn, data_filtro_estoques):
+        if get_estoques_v2_com_controle(conn, data_filtro_estoques):
             set_ultima_execucao(conn, PROCESSO_ESTOQUES)
             logger.info("Todas págs estoques processadas.")
         else:
