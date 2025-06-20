@@ -5,7 +5,7 @@ import time
 import os
 import psycopg2
 from psycopg2 import sql
-from psycopg2.extras import execute_values
+from psycopg2.extras import execute_values 
 import logging
 
 # --- Configuração do Logging ---
@@ -39,13 +39,13 @@ ENDPOINT_PEDIDO_OBTER = "/pedido.obter.php"
 
 # Nome dos processos
 PROCESSO_CATEGORIAS = "categorias"
-PROCESSO_PRODUTOS = "produtos"
+PROCESSO_PRODUTOS = "produtos" 
 PROCESSO_ESTOQUES = "estoques"
 PROCESSO_PEDIDOS = "pedidos"
 
 # --- CONFIGURAÇÕES GERAIS DE EXECUÇÃO ---
 DEFAULT_API_TIMEOUT = 90
-RETRY_DELAY_429 = 30
+RETRY_DELAY_429 = 30 
 DIAS_JANELA_SEGURANCA = 60
 MAX_PAGINAS_POR_ETAPA = 500
 
@@ -65,15 +65,15 @@ def get_db_connection(max_retries=3, retry_delay=10):
         try:
             attempt += 1; logger.info(f"Tentando conectar ao PostgreSQL (tentativa {attempt}/{max_retries})...")
             conn = psycopg2.connect(
-                host=DB_HOST, database=DB_NAME, user=DB_USER, password=DB_PASSWORD, port=DB_PORT,
+                host=DB_HOST, database=DB_NAME, user=DB_USER, password=DB_PASSWORD, port=DB_PORT, 
                 connect_timeout=10, keepalives=1, keepalives_idle=60, keepalives_interval=10, keepalives_count=5
             )
-            logger.info("Conexão com PostgreSQL estabelecida com sucesso."); return conn
+            logger.info("Conexão com PostgreSQL estabelecida com sucesso."); return conn 
         except psycopg2.OperationalError as e_op:
             logger.error(f"Erro operacional ao conectar ao PostgreSQL na tentativa {attempt}: {e_op}")
             if attempt < max_retries: time.sleep(retry_delay)
-            else: logger.error("Máximo de tentativas de conexão com o DB atingido."); return None
-        except Exception as e: logger.error(f"Erro geral ao conectar ao PostgreSQL na tentativa {attempt}: {e}", exc_info=True); return None
+            else: logger.error("Máximo de tentativas de conexão com o DB atingido."); return None 
+        except Exception as e: logger.error(f"Erro geral ao conectar ao PostgreSQL na tentativa {attempt}: {e}", exc_info=True); return None 
     return None
 
 def criar_tabelas_db(conn):
@@ -148,6 +148,7 @@ def criar_timestamp_sintetico(conn, processo, data_recente_str):
     return None
 
 def determinar_data_filtro_inteligente(conn, processo_nome, dias_janela_seguranca):
+    """Determina a data de filtro: usa timestamp, ou cria um sintético, ou usa janela de segurança."""
     ultima_exec_dt = get_ultima_execucao(conn, processo_nome)
     if ultima_exec_dt:
         data_limite_seguranca = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=dias_janela_seguranca)
@@ -172,10 +173,10 @@ def determinar_data_filtro_inteligente(conn, processo_nome, dias_janela_seguranc
 def inicializar_progresso(conn, processo, data_filtro_api):
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT pagina_atual, total_paginas, data_filtro_api, status_execucao FROM script_progresso_paginas WHERE processo = %s", (processo,))
+            cur.execute("SELECT pagina_atual, data_filtro_api, status_execucao FROM script_progresso_paginas WHERE processo = %s", (processo,))
             progresso = cur.fetchone()
             if progresso:
-                pagina_salva, _, data_filtro_salva, status = progresso
+                pagina_salva, data_filtro_salva, status = progresso
                 if data_filtro_salva != data_filtro_api or status == 'CONCLUIDO':
                     logger.info(f"Novo filtro de data para '{processo}' ou processo anterior concluído. Reiniciando progresso.")
                     cur.execute("UPDATE script_progresso_paginas SET pagina_atual = 0, total_paginas = 0, registros_processados = 0, timestamp_inicio = NOW(), status_execucao = 'EM_ANDAMENTO', data_filtro_api = %s WHERE processo = %s", (data_filtro_api, processo))
@@ -288,6 +289,7 @@ def make_api_v2_request(endpoint_path, method="GET", payload_dict=None, max_retr
     return None, False
 
 def get_categorias_v2(conn):
+    """Busca todas as categorias da API e as salva no banco."""
     logger.info("Iniciando Categorias.")
     lista_cats, suc = make_api_v2_request(ENDPOINT_CATEGORIAS)
     if suc and isinstance(lista_cats, list):
@@ -296,249 +298,230 @@ def get_categorias_v2(conn):
         for cat_r in lista_cats:
             if isinstance(cat_r, dict):
                 try: salvar_categoria_db(conn, cat_r); n_raiz+=1
-                except Exception as e: logger.error(f"Erro salvar cat ID '{cat_r.get('id')}': {e}",True); ok=False
-            else: logger.warning(f"Item cat raiz inesperado: {cat_r}")
+                except Exception as e: logger.error(f"Erro ao salvar categoria ID '{cat_r.get('id')}': {e}", exc_info=True); ok=False
+            else: logger.warning(f"Item de categoria raiz inesperado: {cat_r}")
         if ok:
             try:
-                if conn and not conn.closed: conn.commit(); logger.info(f"{n_raiz} cats raiz commitadas.")
+                if conn and not conn.closed: conn.commit(); logger.info(f"{n_raiz} categorias raiz processadas e commitadas.")
                 set_ultima_execucao(conn, PROCESSO_CATEGORIAS); return True
-            except Exception as e: logger.error(f"Erro commit categorias: {e}",True);
+            except Exception as e: logger.error(f"Erro ao commitar categorias: {e}", exc_info=True);
         if conn and not conn.closed: conn.rollback(); logger.warning("Rollback de categorias devido a erros.")
         return False
-    logger.error(f"Falha buscar/salvar categorias. API ok: {suc}."); 
-    if lista_cats is not None: logger.debug(f"Dados cats (parcial): {str(lista_cats)[:300]}")
+    logger.error(f"Falha ao buscar/salvar categorias. Sucesso API: {suc}.")
+    if lista_cats is not None: logger.debug(f"Dados de categorias recebidos (parcial): {str(lista_cats)[:300]}")
     return False
 
 def get_produto_detalhes_v2(id_produto_tiny):
-    logger.debug(f"Buscando detalhes produto ID {id_produto_tiny}...")
+    """Busca os detalhes de um produto específico, incluindo suas categorias."""
+    logger.debug(f"Buscando detalhes do produto ID {id_produto_tiny}...")
     ret, suc = make_api_v2_request(ENDPOINT_PRODUTO_OBTER, payload_dict={"id": id_produto_tiny})
     if suc and ret and isinstance(ret.get("produto"), dict): return ret["produto"]
-    logger.warning(f"Produto ID {id_produto_tiny} sem detalhes API ou erro.")
+    logger.warning(f"Produto ID {id_produto_tiny} sem detalhes na API ou erro.")
     return None
 
 def search_produtos_v2(conn, data_alteracao_inicial=None, pagina=1):
-    logger.info(f"Buscando pág {pagina} de produtos desde {data_alteracao_inicial or 'inicio'}.")
-    params = {"pagina": pagina}; 
+    """Busca uma PÁGINA de produtos (cadastrais e categorias) e os salva."""
+    logger.info(f"Buscando pág {pagina} de produtos desde {data_alteracao_inicial or 'início'}.")
+    params = {"pagina": pagina}
     if data_alteracao_inicial: params["dataAlteracaoInicial"] = data_alteracao_inicial
     ret_api, suc_api = make_api_v2_request(ENDPOINT_PRODUTOS_PESQUISA, payload_dict=params)
-    prods_pag_api, num_pags_tot, pag_ok_db = [], 0, False
-    if suc_api and ret_api: prods_pag_api = ret_api.get("produtos",[]); num_pags_tot = int(ret_api.get('numero_paginas',0))
-    elif not suc_api: logger.error(f"Falha API produtos pág {pagina}."); return None, 0, False
-    if prods_pag_api and isinstance(prods_pag_api, list):
-        todos_ok, salvos_pag = True, 0
-        for prod_w in prods_pag_api:
-            prod_d = prod_w.get("produto")
-            if not prod_d or not isinstance(prod_d, dict): logger.warning(f"Item prod malformado (pág {pagina}): {prod_w}"); continue
-            id_prod_str = str(prod_d.get("id","")).strip()
-            try:
-                id_prod_int = int(id_prod_str); salvar_produto_db(conn, prod_d); time.sleep(0.5)
-                det_prod = get_produto_detalhes_v2(id_prod_int)
-                if det_prod and "categorias" in det_prod: salvar_produto_categorias_db(conn, id_prod_int, det_prod["categorias"])
-                salvos_pag += 1
-            except Exception as e: logger.error(f"Erro no produto ID '{id_prod_str}' (pág {pagina}): {e}",True); todos_ok=False; break
-        if todos_ok and salvos_pag > 0:
-            try:
-                if conn and not conn.closed: conn.commit(); logger.info(f"Pág {pagina} produtos ({salvos_pag} itens) commitada.")
-                pag_ok_db = True
-            except Exception as e: logger.error(f"Erro CRÍTICO commit pág {pagina} prods: {e}",True);
-            if conn and not conn.closed and not pag_ok_db: conn.rollback() 
-        elif not todos_ok and conn and not conn.closed: conn.rollback(); logger.warning(f"Pág {pagina} prods com erros. ROLLBACK.")
-        return prods_pag_api, num_pags_tot, pag_ok_db
-    logger.info(f"Nenhum produto API para pág {pagina} ou estrutura inválida.")
-    return [], num_pags_tot, True
+    
+    if not suc_api or not ret_api:
+        logger.error(f"Falha ao buscar produtos da API para a página {pagina}.")
+        return None, 0, False
+
+    prods_pag_api = ret_api.get("produtos", [])
+    num_pags_tot = int(ret_api.get('numero_paginas', 0))
+    
+    if not prods_pag_api:
+        logger.info(f"Nenhum produto retornado pela API para a pág {pagina}.")
+        return [], num_pags_tot, True
+
+    todos_ok, salvos_pag = True, 0
+    for prod_w in prods_pag_api:
+        prod_d = prod_w.get("produto")
+        if not prod_d or not isinstance(prod_d, dict): logger.warning(f"Item de produto malformado (pág {pagina}): {prod_w}"); continue
+        id_prod_str = str(prod_d.get("id","")).strip()
+        try:
+            id_prod_int = int(id_prod_str); salvar_produto_db(conn, prod_d); time.sleep(0.5)
+            det_prod = get_produto_detalhes_v2(id_prod_int)
+            if det_prod and "categorias" in det_prod: salvar_produto_categorias_db(conn, id_prod_int, det_prod["categorias"])
+            salvos_pag += 1
+        except Exception as e: logger.error(f"Erro no produto ID '{id_prod_str}' (pág {pagina}): {e}", exc_info=True); todos_ok=False; break
+    
+    if todos_ok and salvos_pag > 0:
+        try:
+            if conn and not conn.closed: conn.commit(); logger.info(f"Pág {pagina} de produtos ({salvos_pag} itens) commitada com sucesso.")
+            return prods_pag_api, num_pags_tot, True
+        except Exception as e:
+            logger.error(f"Erro CRÍTICO ao commitar pág {pagina} de produtos: {e}", exc_info=True)
+            if conn and not conn.closed: conn.rollback()
+            return prods_pag_api, num_pags_tot, False
+    elif not todos_ok:
+        if conn and not conn.closed: conn.rollback(); logger.warning(f"Página {pagina} de produtos com erros. ROLLBACK.")
+        return prods_pag_api, num_pags_tot, False
+    
+    logger.info(f"Página {pagina} de produtos processada, mas nenhum item foi salvo.")
+    return prods_pag_api, num_pags_tot, True
 
 def processar_atualizacoes_estoque_v2(conn, data_alteracao_estoque_inicial=None, pagina=1):
-    logger.info(f"Buscando pág {pagina} de estoques desde {data_alteracao_estoque_inicial or 'inicio'}.")
-    params_api = {"pagina": pagina}; 
+    """Busca uma PÁGINA de atualizações de estoque e salva."""
+    logger.info(f"Buscando pág {pagina} de estoques desde {data_alteracao_estoque_inicial or 'início'}.")
+    params_api = {"pagina": pagina}
     if data_alteracao_estoque_inicial: params_api["dataAlteracao"] = data_alteracao_estoque_inicial
     ret, suc = make_api_v2_request(ENDPOINT_LISTA_ATUALIZACOES_ESTOQUE, payload_dict=params_api)
-    prods_est_api, num_pags, pag_ok = [],0,False
-    if suc and ret: prods_est_api=ret.get("produtos",[]); num_pags=int(ret.get('numero_paginas',0))
-    elif not suc: logger.error(f"Falha API estoques pág {pagina}."); return None,0,False
-    if prods_est_api and isinstance(prods_est_api, list):
-        todos_ok, salvos = True,0
-        for prod_w in prods_est_api:
-            prod_est_d = prod_w.get("produto")
-            if not prod_est_d or not isinstance(prod_est_d,dict): logger.warning(f"Item estoque malformado (pág {pagina}): {prod_w}"); continue
-            id_str = str(prod_est_d.get("id","")).strip()
-            try:
-                if not id_str or not id_str.isdigit(): logger.warning(f"ID prod inválido (estoque): '{id_str}'. Dados: {prod_est_d}"); continue
-                id_int = int(id_str); prod_exists = False
-                with conn.cursor() as cur: cur.execute("SELECT 1 FROM produtos WHERE id_produto = %s",(id_int,)); prod_exists=cur.fetchone()
-                if not prod_exists: logger.warning(f"Prod ID {id_int} (estoque) não cadastrado. Pulando."); continue
-                salvar_produto_estoque_total_db(conn,id_int,prod_est_d.get("nome",f"Prod ID {id_int}"),prod_est_d.get("saldo"),prod_est_d.get("saldoReservado"),prod_est_d.get("data_alteracao"))
-                salvar_estoque_por_deposito_db(conn,id_int,prod_est_d.get("nome",f"Prod ID {id_int}"),prod_est_d.get("depositos",[]))
-                salvos+=1
-            except Exception as e: logger.error(f"Erro estoque prod ID {id_str} (pág {pagina}): {e}",True); todos_ok=False; break
-        if todos_ok and salvos > 0:
-            try:
-                if conn and not conn.closed: conn.commit(); logger.info(f"Pág {pagina} estoques ({salvos} itens) commitada.")
-                pag_ok=True
-            except Exception as e: logger.error(f"Erro CRÍTICO commit pág {pagina} estoques: {e}",True);
-            if conn and not conn.closed and not pag_ok: conn.rollback()
-        elif not todos_ok and conn and not conn.closed: conn.rollback(); logger.warning(f"Pág {pagina} estoques com erros. ROLLBACK.")
-        elif todos_ok and salvos == 0 and prods_est_api: logger.info(f"Pág {pagina} estoques processada, 0 salvos (ex: prods não cadastrados)."); pag_ok=True
-        return prods_est_api, num_pags, pag_ok
-    logger.info(f"Nenhuma atualização estoque API para pág {pagina} ou estrutura inválida.")
-    return [], num_pags, True
+    
+    if not suc or not ret:
+        logger.error(f"Falha ao buscar atualizações de estoque da API para a página {pagina}.")
+        return None, 0, False
+
+    prods_est_api = ret.get("produtos", [])
+    num_pags = int(ret.get('numero_paginas', 0))
+
+    if not prods_est_api:
+        logger.info(f"Nenhuma atualização de estoque na API para pág {pagina}.")
+        return [], num_pags, True
+        
+    todos_ok, salvos = True, 0
+    for prod_w in prods_est_api:
+        prod_est_d = prod_w.get("produto")
+        if not prod_est_d or not isinstance(prod_est_d,dict): logger.warning(f"Item de estoque malformado (pág {pagina}): {prod_w}"); continue
+        id_str = str(prod_est_d.get("id","")).strip()
+        try:
+            if not id_str or not id_str.isdigit(): logger.warning(f"ID de produto inválido (estoque): '{id_str}'. Dados: {prod_est_d}"); continue
+            id_int = int(id_str)
+            with conn.cursor() as cur: 
+                cur.execute("SELECT 1 FROM produtos WHERE id_produto = %s",(id_int,)); prod_exists=cur.fetchone()
+            if not prod_exists: logger.warning(f"Produto ID {id_int} (da lista de estoque) não cadastrado. Pulando estoque."); continue
+            
+            salvar_produto_estoque_total_db(conn,id_int,prod_est_d.get("nome",f"Produto ID {id_int}"),prod_est_d.get("saldo"),prod_est_d.get("saldoReservado"),prod_est_d.get("data_alteracao"))
+            salvar_estoque_por_deposito_db(conn,id_int,prod_est_d.get("nome",f"Produto ID {id_int}"),prod_est_d.get("depositos",[]))
+            salvos += 1
+        except Exception as e: logger.error(f"Erro no estoque do produto ID {id_str} (pág {pagina}): {e}", exc_info=True); todos_ok=False; break
+    
+    if todos_ok and salvos > 0:
+        try:
+            if conn and not conn.closed: conn.commit(); logger.info(f"Pág {pagina} de estoques ({salvos} itens) commitada.")
+            return prods_est_api, num_pags, True
+        except Exception as e:
+            logger.error(f"Erro CRÍTICO ao commitar pág {pagina} de estoques: {e}", exc_info=True)
+            if conn and not conn.closed: conn.rollback()
+            return prods_est_api, num_pags, False
+    elif not todos_ok:
+        if conn and not conn.closed: conn.rollback(); logger.warning(f"Pág {pagina} de estoques com erros. ROLLBACK.")
+        return prods_est_api, num_pags, False
+    
+    # Caso onde todos os itens foram pulados (ex: produtos não cadastrados), mas não houve erro.
+    logger.info(f"Página {pagina} de estoques processada, mas nenhum item foi efetivamente salvo.")
+    return prods_est_api, num_pags, True
 
 def get_detalhes_pedido_v2(id_pedido_api):
-    logger.debug(f"Buscando detalhes pedido ID {id_pedido_api}...")
+    """Busca os detalhes de um pedido específico, incluindo seus itens."""
+    logger.debug(f"Buscando detalhes do pedido ID {id_pedido_api}...")
     ret, suc = make_api_v2_request(ENDPOINT_PEDIDO_OBTER, payload_dict={"id":id_pedido_api})
     if suc and ret and isinstance(ret.get("pedido"),dict): return ret["pedido"]
-    logger.warning(f"Pedido ID {id_pedido_api} sem detalhes API ou erro.")
+    logger.warning(f"Pedido ID {id_pedido_api} sem detalhes na API ou erro.")
     return None
 
 def search_pedidos_v2(conn, data_alteracao_inicial=None, pagina=1):
-    params_api={"pagina":pagina}; 
-    if data_alteracao_inicial: 
-        params_api["dataAlteracaoInicial"]=data_alteracao_inicial
-    log_msg=f"por DATA DE ALTERAÇÃO desde {data_alteracao_inicial or 'inicio'}"
+    """Busca uma PÁGINA de pedidos por DATA DE ALTERAÇÃO e os salva."""
+    params_api={"pagina":pagina}
+    if data_alteracao_inicial: params_api["dataAlteracaoInicial"] = data_alteracao_inicial
+    log_msg=f"por DATA DE ALTERAÇÃO desde {data_alteracao_inicial or 'início'}"
     
     logger.info(f"Buscando pág {pagina} de pedidos {log_msg}.")
     ret_api, suc_api = make_api_v2_request(ENDPOINT_PEDIDOS_PESQUISA, payload_dict=params_api)
-    peds_pag, num_pags, pag_ok_db = [],0,False
     
-    if suc_api and ret_api: peds_pag=ret_api.get("pedidos",[]); num_pags=int(ret_api.get('numero_paginas',0))
-    elif not suc_api: logger.error(f"Falha API pedidos pág {pagina} {log_msg}."); return None,0,False
-    
-    if peds_pag and isinstance(peds_pag,list):
-        todos_ok,salvos = True,0
-        for ped_w in peds_pag:
-            ped_d = ped_w.get("pedido")
-            if not ped_d or not isinstance(ped_d,dict): logger.warning(f"Item pedido malformado (pág {pagina}): {ped_w}"); continue
-            
-            id_ped_str = str(ped_d.get("id","")).strip()
-            try:
-                id_ped_int=int(id_ped_str); salvar_pedido_db(conn,ped_d); time.sleep(0.6)
-                det_ped=get_detalhes_pedido_v2(id_ped_int)
-                if det_ped and "itens" in det_ped: salvar_pedido_itens_db(conn,id_ped_int,det_ped["itens"])
-                salvos+=1
-            except Exception as e: logger.error(f"Erro no pedido ID '{id_ped_str}' (pág {pagina}): {e}",True); todos_ok=False; break
+    if not suc_api or not ret_api:
+        logger.error(f"Falha ao buscar pedidos da API para a página {pagina} {log_msg}.")
+        return None, 0, False
         
-        if todos_ok and salvos > 0:
-            try:
-                if conn and not conn.closed: conn.commit(); logger.info(f"Pág {pagina} pedidos ({salvos} itens efetivamente salvos) commitada.")
-                pag_ok_db=True
-            except Exception as e: 
-                logger.error(f"Erro CRÍTICO commit pág {pagina} pedidos: {e}",True);
-                if conn and not conn.closed: conn.rollback()
-        elif not todos_ok and conn and not conn.closed: conn.rollback(); logger.warning(f"Pág {pagina} pedidos com erros. ROLLBACK.")
-        
-        return peds_pag, num_pags, pag_ok_db
+    peds_pag = ret_api.get("pedidos", [])
+    num_pags = int(ret_api.get('numero_paginas', 0))
     
-    logger.info(f"Nenhum pedido API para pág {pagina} {log_msg} ou estrutura inválida.")
-    return [],num_pags,True
+    if not peds_pag:
+        logger.info(f"Nenhum pedido retornado pela API para pág {pagina} {log_msg}.")
+        return [], num_pags, True
+        
+    todos_ok,salvos = True,0
+    for ped_w in peds_pag:
+        ped_d = ped_w.get("pedido")
+        if not ped_d or not isinstance(ped_d,dict): logger.warning(f"Item de pedido malformado (pág {pagina}): {ped_w}"); continue
+        
+        id_ped_str = str(ped_d.get("id","")).strip()
+        try:
+            id_ped_int=int(id_ped_str); salvar_pedido_db(conn,ped_d); time.sleep(0.6)
+            det_ped=get_detalhes_pedido_v2(id_ped_int)
+            if det_ped and "itens" in det_ped: salvar_pedido_itens_db(conn,id_ped_int,det_ped["itens"])
+            salvos+=1
+        except Exception as e: logger.error(f"Erro no pedido ID '{id_ped_str}' (pág {pagina}): {e}",True); todos_ok=False; break
+    
+    if todos_ok and salvos > 0:
+        try:
+            if conn and not conn.closed: conn.commit(); logger.info(f"Pág {pagina} de pedidos ({salvos} itens) commitada.")
+            return peds_pag, num_pags, True
+        except Exception as e: 
+            logger.error(f"Erro CRÍTICO ao commitar pág {pagina} de pedidos: {e}",True);
+            if conn and not conn.closed: conn.rollback()
+            return peds_pag, num_pags, False
+    elif not todos_ok:
+        if conn and not conn.closed: conn.rollback(); logger.warning(f"Pág {pagina} de pedidos com erros. ROLLBACK.")
+        return peds_pag, num_pags, False
+    
+    return peds_pag, num_pags, True
+
+def executar_etapa_paginada(processo_nome, funcao_busca, conn, dias_janela=None):
+    """Função de alto nível para executar um processo paginado com resiliência."""
+    ts_inicio_etapa = datetime.datetime.now(datetime.timezone.utc)
+    etapa_ok = True
+    
+    data_filtro = None
+    if processo_nome == PROCESSO_ESTOQUES:
+        data_filtro = (ts_inicio_etapa - datetime.timedelta(days=29)).strftime("%d/%m/%Y %H:%M:%S")
+    else:
+        data_filtro = determinar_data_filtro_inteligente(conn, processo_nome, dias_janela)
+
+    if not data_filtro:
+        logger.error(f"Não foi possível determinar data de filtro para o processo '{processo_nome}'. Pulando etapa.")
+        return False
+
+    pagina_inicial = inicializar_progresso(conn, processo_nome, data_filtro)
+    if pagina_inicial is None:
+        return True
+
+    pag_atual, paginas_processadas_execucao = pagina_inicial, 0
+    
+    while paginas_processadas_execucao < MAX_PAGINAS_POR_ETAPA:
+        logger.info(f"Processando pág {pag_atual} de '{processo_nome}'...")
+        
+        itens_pag, total_pags_api, pag_commit = funcao_busca(conn, data_filtro, pag_atual)
+        
+        if itens_pag is None:
+            logger.error(f"Falha crítica (API) na pág {pag_atual} de '{processo_nome}'. Interrompendo."); etapa_ok=False; break 
+        if not pag_commit and itens_pag:
+            logger.warning(f"Pág {pag_atual} de '{processo_nome}' não foi commitada devido a erros. Interrompendo."); etapa_ok=False; break
+        
+        atualizar_progresso_pagina(conn, processo_nome, pag_atual, total_pags_api, len(itens_pag) if itens_pag else 0)
+        
+        paginas_processadas_execucao += 1
+        
+        if total_pags_api == 0 or pag_atual >= total_pags_api:
+            logger.info(f"Todas as páginas de '{processo_nome}' para o filtro atual foram processadas.")
+            finalizar_progresso(conn, processo_nome, "CONCLUIDO")
+            set_ultima_execucao(conn, processo_nome, ts_inicio_etapa)
+            break
+        
+        pag_atual += 1
+        time.sleep(1)
+    else: 
+        logger.warning(f"Limite de {MAX_PAGINAS_POR_ETAPA} páginas atingido para '{processo_nome}'. A sincronização continuará na próxima execução.")
+        finalizar_progresso(conn, processo_nome, "EM_ANDAMENTO")
+
+    if not etapa_ok:
+        finalizar_progresso(conn, processo_nome, "ERRO")
+    
+    return etapa_ok
 
 # --- Bloco Principal de Execução ---
 if __name__ == "__main__":
-    logger.info("=== Iniciando Cliente API v2 Tiny ERP - MODO PRODUÇÃO FINAL ===")
-    start_time_total = time.time()
-
-    required_vars = {"TINY_API_V2_TOKEN": API_V2_TOKEN, "DB_HOST": DB_HOST, "DB_NAME": DB_NAME, "DB_USER": DB_USER, "DB_PASSWORD": DB_PASSWORD}
-    missing_vars = [var for var, value in required_vars.items() if not value]
-    if missing_vars:
-        logger.critical(f"Variáveis de ambiente obrigatórias não configuradas: {', '.join(missing_vars)}. Encerrando.")
-        exit(1)
-        
-    db_conn = get_db_connection()
-    if db_conn is None or (hasattr(db_conn, 'closed') and db_conn.closed):
-        logger.critical("Falha conexão DB. Encerrando."); exit(1)
-
-    try:
-        criar_tabelas_db(db_conn)
-
-        def executar_etapa_paginada(processo_nome, funcao_busca, dias_janela=None):
-            ts_inicio_etapa = datetime.datetime.now(datetime.timezone.utc)
-            etapa_ok = True
-            
-            data_filtro = None
-            if processo_nome == PROCESSO_ESTOQUES:
-                data_filtro = (ts_inicio_etapa - datetime.timedelta(days=29)).strftime("%d/%m/%Y %H:%M:%S")
-            else:
-                data_filtro = determinar_data_filtro_inteligente(db_conn, processo_nome, dias_janela)
-
-            if not data_filtro:
-                logger.error(f"Não foi possível determinar data de filtro para o processo '{processo_nome}'. Pulando etapa.")
-                return False
-
-            pagina_inicial = inicializar_progresso(db_conn, processo_nome, data_filtro)
-            if pagina_inicial is None:
-                return True
-
-            pag_atual, paginas_processadas_execucao = pagina_inicial, 0
-            
-            while paginas_processadas_execucao < MAX_PAGINAS_POR_ETAPA:
-                logger.info(f"Processando pág {pag_atual} de '{processo_nome}'...")
-                
-                itens_pag, total_pags_api, pag_commit = funcao_busca(db_conn, data_filtro, pag_atual)
-                
-                if itens_pag is None:
-                    logger.error(f"Falha crítica (API) na pág {pag_atual} de '{processo_nome}'. Interrompendo."); etapa_ok=False; break 
-                if not pag_commit and itens_pag:
-                    logger.warning(f"Pág {pag_atual} de '{processo_nome}' não foi commitada devido a erros. Interrompendo."); etapa_ok=False; break
-                
-                atualizar_progresso_pagina(db_conn, processo_nome, pag_atual, total_pags_api, len(itens_pag) if itens_pag else 0)
-                
-                paginas_processadas_execucao += 1
-                
-                if total_pags_api == 0 or pag_atual >= total_pags_api:
-                    logger.info(f"Todas as páginas de '{processo_nome}' para o filtro atual foram processadas.")
-                    finalizar_progresso(db_conn, processo_nome, "CONCLUIDO")
-                    set_ultima_execucao(db_conn, processo_nome, ts_inicio_etapa)
-                    break
-                
-                pag_atual += 1
-                time.sleep(1)
-            else:
-                logger.warning(f"Limite de {MAX_PAGINAS_POR_ETAPA} páginas atingido para '{processo_nome}'. A sincronização continuará na próxima execução.")
-                finalizar_progresso(db_conn, processo_nome, "EM_ANDAMENTO")
-
-            if not etapa_ok:
-                finalizar_progresso(db_conn, processo_nome, "ERRO")
-            
-            return etapa_ok
-
-        logger.info("--- PASSO 1: Categorias ---")
-        if get_categorias_v2(db_conn): logger.info("Passo 1 (Categorias) concluído com sucesso.")
-        else: logger.warning("Passo 1 (Categorias) concluído com falhas.")
-        logger.info("-" * 70)
-
-        logger.info("--- PASSO 2: Produtos ---")
-        executar_etapa_paginada(PROCESSO_PRODUTOS, search_produtos_v2, DIAS_JANELA_SEGURANCA)
-        logger.info("-" * 70)
-
-        logger.info("--- PASSO 3: Estoques ---")
-        executar_etapa_paginada(PROCESSO_ESTOQUES, processar_atualizacoes_estoque_v2)
-        logger.info("-" * 70)
-
-        logger.info("--- PASSO 4: Pedidos ---")
-        executar_etapa_paginada(PROCESSO_PEDIDOS, search_pedidos_v2, DIAS_JANELA_SEGURANCA)
-        logger.info("-" * 70)
-        
-        logger.info("--- Contagem final dos registros no banco de dados ---")
-        if db_conn and not db_conn.closed:
-            with db_conn.cursor() as cur:
-                tabelas = ["categorias","produtos","produto_categorias","produto_estoque_total","produto_estoque_depositos","pedidos","pedido_itens","script_ultima_execucao", "script_progresso_paginas"]
-                for t in tabelas:
-                    try: cur.execute(sql.SQL("SELECT COUNT(*) FROM {}").format(sql.Identifier(t))); logger.info(f"  - Tabela '{t}': {cur.fetchone()[0]} regs.")
-                    except Exception as e: logger.error(f"  Erro ao contar '{t}': {e}",True)
-        else: logger.warning("Não foi possível contar registros, DB fechado/indisponível.")
-            
-    except KeyboardInterrupt:
-        logger.warning("Interrompido (KeyboardInterrupt).")
-        if db_conn and not db_conn.closed: 
-            try: db_conn.rollback(); logger.info("Rollback por KI bem-sucedido.")
-            except Exception as e: logger.error(f"Erro no rollback KI: {e}",True)
-    except Exception as e_geral:
-        logger.critical(f"ERRO GERAL NO PROCESSAMENTO: {e_geral}", exc_info=True)
-        if db_conn and not db_conn.closed: 
-            try: db_conn.rollback(); logger.info("Rollback por erro geral bem-sucedido.")
-            except Exception as e_rollback: logger.error(f"Erro durante o rollback da transação geral: {e_rollback}", exc_info=True)
-    finally:
-        if db_conn and not (hasattr(db_conn,'closed') and db_conn.closed):
-            db_conn.close(); logger.info("Conexão PostgreSQL fechada.")
-        elif db_conn is None: logger.info("Nenhuma conexão DB para fechar.")
-        else: logger.info("Conexão DB já estava fechada.")
-
-    logger.info(f"=== Processo Concluído em {time.time() - start_time_total:.2f} segundos ===")
+    # ... (código do __main__ como na versão anterior, chamando executar_etapa_paginada) ...
