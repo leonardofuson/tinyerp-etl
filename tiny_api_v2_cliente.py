@@ -87,15 +87,14 @@ def criar_tabelas_db(conn):
         """CREATE TABLE IF NOT EXISTS script_ultima_execucao (nome_processo TEXT PRIMARY KEY, timestamp_ultima_execucao TIMESTAMP WITH TIME ZONE );""",
         """CREATE TABLE IF NOT EXISTS script_progresso_paginas (
             id SERIAL PRIMARY KEY,
-            processo TEXT NOT NULL,
+            processo TEXT NOT NULL UNIQUE,
             pagina_atual INTEGER DEFAULT 0,
             total_paginas INTEGER DEFAULT 0,
             registros_processados INTEGER DEFAULT 0,
             timestamp_inicio TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             timestamp_ultima_pagina TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             status_execucao TEXT DEFAULT 'EM_ANDAMENTO',
-            observacoes TEXT,
-            UNIQUE(processo)
+            observacoes TEXT
         );"""
     )
     
@@ -484,9 +483,13 @@ def search_produtos_v2_com_controle(conn, data_filtro_api):
         
         # Processar produtos da página
         produtos_salvos_pagina = 0
+        logger.info(f"DEBUG PRODUTOS - Encontrados {len(produtos)} produtos na página {pagina_atual}")
         for produto_resumo in produtos:
+            logger.debug(f"DEBUG PRODUTOS - Processando produto: {produto_resumo.get('id', 'N/A')}")
             if processar_produto_completo(conn, produto_resumo):
                 produtos_salvos_pagina += 1
+            else:
+                logger.debug(f"DEBUG PRODUTOS - Falha ao processar produto: {produto_resumo.get('id', 'N/A')}")
         
         total_produtos_salvos += produtos_salvos_pagina
         
@@ -632,7 +635,8 @@ def get_estoques_v2_com_controle(conn, data_filtro_api):
         # DEBUG: Log da estrutura de retorno
         logger.info(f"DEBUG ESTOQUES - Estrutura retorno página {pagina_atual}: {list(retorno.keys()) if isinstance(retorno, dict) else type(retorno)}")
         
-        if "registros" not in retorno or not retorno["registros"]:
+        # A API de estoques retorna 'produtos' em vez de 'registros'
+        if "produtos" not in retorno or not retorno["produtos"]:
             logger.info(f"Nenhum estoque encontrado na página {pagina_atual}. Finalizando busca.")
             # DEBUG: Log do conteúdo completo se não há registros
             if isinstance(retorno, dict) and len(str(retorno)) < 500:
@@ -640,7 +644,7 @@ def get_estoques_v2_com_controle(conn, data_filtro_api):
             finalizar_progresso(conn, PROCESSO_ESTOQUES, "CONCLUIDO")
             break
         
-        registros = retorno["registros"]
+        registros = retorno["produtos"]  # Mudança aqui: produtos em vez de registros
         total_paginas_api = int(retorno.get("numero_paginas", 1))
         logger.info(f"DEBUG ESTOQUES - Encontrados {len(registros)} registros na página {pagina_atual}")
         
@@ -758,20 +762,35 @@ def search_pedidos_v2_com_controle(conn, data_filtro_api):
         
         retorno = data["retorno"]
         
+        # Obter total de páginas primeiro
+        total_paginas_api = int(retorno.get("numero_paginas", 1))
+        
         # Verificar se há pedidos
         if "pedidos" not in retorno or not retorno["pedidos"]:
-            logger.info(f"Nenhum pedido encontrado na página {pagina_atual}. Finalizando busca.")
-            finalizar_progresso(conn, PROCESSO_PEDIDOS, "CONCLUIDO")
-            break
+            # Se não há pedidos mas ainda há páginas, continuar
+            if pagina_atual < total_paginas_api:
+                logger.info(f"Nenhum pedido na página {pagina_atual}, mas continuando (página {pagina_atual}/{total_paginas_api})")
+                # Atualizar progresso mesmo sem dados
+                atualizar_progresso_pagina(conn, PROCESSO_PEDIDOS, pagina_atual, total_paginas_api, 0)
+                pagina_atual += 1
+                time.sleep(1)
+                continue
+            else:
+                logger.info(f"Nenhum pedido encontrado na página {pagina_atual}. Finalizando busca.")
+                finalizar_progresso(conn, PROCESSO_PEDIDOS, "CONCLUIDO")
+                break
         
         pedidos = retorno["pedidos"]
-        total_paginas_api = int(retorno.get("numero_paginas", 1))
         
         # Processar pedidos da página
         pedidos_salvos_pagina = 0
+        logger.info(f"DEBUG PEDIDOS - Encontrados {len(pedidos)} pedidos na página {pagina_atual}")
         for pedido_resumo in pedidos:
+            logger.debug(f"DEBUG PEDIDOS - Processando pedido: {pedido_resumo.get('id', 'N/A')}")
             if processar_pedido_completo(conn, pedido_resumo):
                 pedidos_salvos_pagina += 1
+            else:
+                logger.debug(f"DEBUG PEDIDOS - Falha ao processar pedido: {pedido_resumo.get('id', 'N/A')}")
         
         total_pedidos_salvos += pedidos_salvos_pagina
         
